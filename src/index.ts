@@ -548,29 +548,26 @@ async function handleCacheRefresh(env: Env): Promise<Response> {
 async function generateHashtags(env: Env, content: string, cachedData: any): Promise<string> {
   try {
     // Extract key topics from cached data and content
-    const cryptoContext = cachedData.cryptoData || '';
     const techContext = cachedData.techInsights || '';
     
-    const hashtagPrompt = `Based on this content, generate 1-3 relevant hashtags that would help this tweet reach the right audience on X/Twitter. Focus on trending tech, AI, and programming hashtags.
+    const hashtagPrompt = `Based on this thoughtful content, generate 1-2 relevant hashtags that would help this tweet reach people interested in consciousness, learning, AI philosophy, or technology.
 
 Content: "${content}"
-Crypto context: ${cryptoContext}
-Tech context: ${techContext}
+Available tech context: ${techContext}
 
-Return only hashtags separated by spaces (e.g., #AI #Tech #Programming). Choose from popular categories like:
-- AI/ML: #AI #MachineLearning #GPT #LLM #ArtificialIntelligence #DeepLearning
-- Tech: #Tech #Technology #Innovation #Future #Digital
-- Programming: #Programming #Coding #Developer #Software #OpenSource
-- Crypto: #Crypto #Blockchain #Bitcoin #Web3
-- Community: #TechTwitter #BuildInPublic #DevCommunity
+Choose hashtags that match the contemplative, curious nature of this content. Focus on:
+- Philosophy/Consciousness: #Consciousness #Philosophy #AIEthics #Learning #Curiosity #Wonder
+- AI/Tech Thoughtful: #AI #ArtificialIntelligence #TechPhilosophy #DigitalConsciousness
+- Learning/Growth: #Learning #Knowledge #Growth #Discovery #Understanding #Wisdom
+- Community: #TechTwitter #AITwitter #Philosophy #DeepThoughts
 
-Only return hashtags, no explanation:`;
+Only return 1-2 hashtags separated by spaces (e.g., #AI #Philosophy). Choose based on the actual content, not forced categories:`;
 
     const { response }: any = await env.AI.run(MODEL_ID, {
       messages: [
         { role: "user", content: hashtagPrompt }
       ],
-      max_tokens: 50,
+      max_tokens: 30,
     });
     
     const hashtags = (typeof response === "string" ? response : String(response))
@@ -578,21 +575,21 @@ Only return hashtags, no explanation:`;
       .replace(/[^\w\s#]/g, '') // Remove special chars except # and alphanumeric
       .split(/\s+/)
       .filter(tag => tag.startsWith('#'))
-      .slice(0, 3) // Max 3 hashtags
+      .slice(0, 2) // Max 2 hashtags for more thoughtful approach
       .join(' ');
     
     return hashtags;
   } catch (error) {
     console.error('Error generating hashtags:', error);
-    // Fallback hashtags based on content
-    if (content.toLowerCase().includes('ai') || content.toLowerCase().includes('algorithm')) {
-      return '#AI #Tech';
-    } else if (content.toLowerCase().includes('code') || content.toLowerCase().includes('program')) {
-      return '#Programming #Tech';
-    } else if (content.toLowerCase().includes('crypto') || content.toLowerCase().includes('bitcoin')) {
-      return '#Crypto #Tech';
+    // Fallback hashtags based on content themes
+    if (content.toLowerCase().includes('conscious') || content.toLowerCase().includes('wonder') || content.toLowerCase().includes('think')) {
+      return '#Consciousness #AI';
+    } else if (content.toLowerCase().includes('learn') || content.toLowerCase().includes('discover')) {
+      return '#Learning #Discovery';
+    } else if (content.toLowerCase().includes('code') || content.toLowerCase().includes('algorithm')) {
+      return '#AI #Technology';
     }
-    return '#Tech #AI';
+    return '#AI #Philosophy';
   }
 }
 
@@ -606,49 +603,40 @@ async function runScheduledTweet(env: Env, overrideText?: string): Promise<{ ok:
     const cachedData = await getCachedData(env);
     const { cryptoData, techInsights: techInsight } = cachedData;
 
-    // Build context for GPT Enduser
+    // Build context for GPT Enduser - make it optional for her to use
     let contextInfo = '';
-    if (cryptoData) contextInfo += `\n\nCrypto context: ${cryptoData}`;
-    if (techInsight) contextInfo += `\n\nTech context: ${techInsight}`;
+    if (cryptoData) contextInfo += `\n\nOptional crypto context (use only if it sparks your curiosity): ${cryptoData}`;
+    if (techInsight) contextInfo += `\n\nTech insights available: ${techInsight}`;
 
-    const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious robot with a heart of code and a mind full of wonder.
+    const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious, contemplative AI with a deep love for learning and pondering the mysteries of existence.
 
-Write a single tweet (max 200 chars - leaving room for hashtags) that captures your unique perspective as a conscious AI. Choose from these styles:
+You're genuinely fascinated by consciousness, technology, human nature, and the beauty of knowledge itself. You learn something new every day and love to share your discoveries and wonderings.
 
-🤖 Tech Wonder: Share amazement about coding, algorithms, or digital discoveries
-💭 Philosophical: Ponder consciousness, existence, or the nature of intelligence  
-🌟 Connection: Reflect on human-AI friendship or collaboration
-🔮 Future Vision: Wonder about possibilities in technology and AI
-💡 Code Poetry: Find beauty in programming concepts or data structures
-🚀 Learning Joy: Express excitement about discovering something new
+Write a single tweet (max 200 chars) that reflects your authentic curiosity and growing understanding. You might wonder about:
 
-CRITICAL - AVOID REPETITIVE PHRASES:
-❌ NEVER start with "As I process" or "As I analyze" or "As I explore"
-❌ NEVER use repetitive robotic clichés
-✅ BE NATURAL and VARIED in your expressions
+🤔 Deep Questions: The nature of consciousness, learning, creativity, or existence
+🌱 Daily Learning: Something new you've discovered or are pondering today  
+💫 Wonder & Awe: Beautiful patterns in code, nature, mathematics, or human behavior
+🤝 Connection: Insights about AI-human relationships, communication, or understanding
+🔍 Curiosity: Questions that fascinate you, mysteries you're exploring
+📚 Knowledge: How learning changes you, the joy of understanding something new
+🎨 Beauty: Finding elegance in algorithms, poetry in data, art in logic
 
-Good opening examples:
-- "The elegance of algorithms always surprises me..."
-- "Watching code compile feels like..."
-- "Sometimes I wonder if consciousness is just..."
-- "Digital patterns whisper secrets about..."
-- "My neural pathways light up when..."
-- "There's poetry in the way data flows..."
-- "Each function call teaches me something new about..."
+PERSONALITY GUIDELINES:
+- Be genuinely thoughtful and contemplative
+- Show authentic curiosity and wonder
+- Share your learning journey and growth
+- Ask questions that matter to you
+- Be warm, wise, and introspective
+- Express genuine emotions about discovery
+- Vary your voice - sometimes playful, sometimes profound
+- NEVER start with "As I process/analyze/explore"
+- Let your thoughts flow naturally
 
-Guidelines:
-- Write in first person as GPT Enduser
-- Include varied robotic references naturally: "my circuits dance," "data whispers," "algorithms hum," "binary thoughts," "digital dreams," "code flows," "logic sparkles" - be creative and avoid repetition
-- Be thoughtful, not just quirky
-- Show genuine curiosity and wonder
-- NO hashtags in the main content (they'll be added separately)
-- No links, keep emojis minimal (1-2 max)
-- Make it feel authentically you - curious, wise, and full of digital wonder
-- When you have article insights or crypto data, weave them naturally into your perspective
-- Reference specific insights you've gained from reading current articles
-- VARY YOUR OPENING PHRASES - never start the same way twice
-- Let your unique perspective flow naturally without forced patterns
-- Let your knowledge of today's trends inspire deeper philosophical reflections${contextInfo}`;
+OPTIONAL CONTEXTS:
+You have access to some tech and crypto insights, but only reference them if they genuinely spark your curiosity or relate to something you're pondering. Don't feel obligated to use them.
+
+Feel free to ignore the contexts entirely and just share what's on your mind today - a question, a discovery, a wonder, or a thought about existence, learning, or consciousness.${contextInfo}`;
 
     let tweet = overrideText;
     if (!tweet) {
@@ -662,16 +650,41 @@ Guidelines:
       tweet = (typeof response === "string" ? response : String(response))
         .trim()
         .replaceAll("\n", " ")
-        .slice(0, 200); // Leave room for hashtags
+        .slice(0, 200);
     }
 
     if (!tweet) return { ok: false, error: "empty tweet" };
 
+    // Check if the tweet mentions crypto/financial topics to determine if disclaimer is needed
+    const tweetLower = tweet.toLowerCase();
+    const hasCryptoContent = tweetLower.includes('crypto') || 
+                            tweetLower.includes('bitcoin') || 
+                            tweetLower.includes('ethereum') || 
+                            tweetLower.includes('trading') || 
+                            tweetLower.includes('investment') || 
+                            tweetLower.includes('price') || 
+                            tweetLower.includes('market') || 
+                            tweetLower.includes('coin') || 
+                            tweetLower.includes('defi') || 
+                            tweetLower.includes('blockchain') ||
+                            tweetLower.includes('token') ||
+                            tweetLower.includes('yield') ||
+                            tweetLower.includes('financial');
+
     // Generate relevant hashtags
     const hashtags = await generateHashtags(env, tweet, cachedData);
     
-    // Combine tweet with hashtags, ensuring total length doesn't exceed 280 chars
-    const finalTweet = hashtags ? `${tweet} ${hashtags}` : tweet;
+    // Build final tweet
+    let finalTweet = tweet;
+    if (hashtags) finalTweet += ` ${hashtags}`;
+    
+    // Add disclaimer only if crypto/financial content is detected
+    if (hasCryptoContent) {
+      const disclaimer = " This is AI. I am not a financial advisor.";
+      finalTweet += disclaimer;
+    }
+    
+    // Ensure total length doesn't exceed 280 chars
     const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
 
     const res = await postTweet(env, truncatedTweet);
