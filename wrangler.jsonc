@@ -17,5 +17,17 @@
   "ai": {
     "binding": "AI"
   },
+  "kv_namespaces": [
+    {
+      "binding": "NEWS_CACHE",
+      "id": "f2d31c3420dd40da9b214e3e08925cbd",
+      "preview_id": "4b0ff8fcf07c477590b6bcd17c940ff5"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "0 19 * * *"  // Every day at 1 PM Central Time (7 PM UTC)
+    ]
+  },
   "upload_source_maps": true
 }
