@@ -25,6 +25,11 @@ export interface Env {
   TWITTER_API_SECRET: string; // Consumer Secret
   TWITTER_ACCESS_TOKEN: string; // Access Token
   TWITTER_ACCESS_SECRET: string; // Access Token Secret
+  
+  /**
+   * Twitter/X Bearer Token (App context) - required for reading mentions
+   */
+  TWITTER_BEARER_TOKEN?: string;
 
   /**
    * Optional admin token for protected manual triggers.

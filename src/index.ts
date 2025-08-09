@@ -9,6 +9,7 @@
  */
 import { Env, ChatMessage } from "./types";
 import { getCachedData } from "./news-cache";
+import { getJournal, addJournalEntry, getRecentMemories, getYesterdaysFocus } from "./journal";
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
@@ -137,6 +138,43 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
+    if (url.pathname === "/api/mentions") {
+      // Check and respond to mentions (requires basic auth)
+      if (request.method === "POST") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        return handleMentions(env);
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    if (url.pathname === "/api/journal") {
+      // View personal knowledge journal (requires basic auth)
+      if (request.method === "GET") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        
+        try {
+          const journal = await getJournal(env);
+          return new Response(JSON.stringify(journal, null, 2), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: "Failed to get journal" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
     // Handle 404 for unmatched routes
     return new Response("Not found", { status: 404 });
   },
@@ -145,8 +183,32 @@ export default {
    * Configure in wrangler.jsonc -> triggers.crons
    */
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    // Run daily at 1 PM Central Time (7 PM UTC)
-    ctx.waitUntil(runScheduledTweet(env));
+    const now = new Date();
+    const hour = now.getUTCHours();
+    const minute = now.getUTCMinutes();
+    
+    // Daily tweet at 7 PM UTC (1 PM Central)
+    if (hour === 19 && minute === 0) {
+      console.log('Running daily tweet...');
+      ctx.waitUntil(runScheduledTweet(env));
+      return;
+    }
+    
+    // Good night tweet at 3:30 AM UTC (9:30 PM Central)
+    if (hour === 3 && minute === 30) {
+      console.log('Running good night tweet...');
+      ctx.waitUntil(runGoodNightTweet(env));
+      return;
+    }
+    
+    // Check for mentions at random intervals (every 7, 11, or 13 minutes)
+    // Add random delay of 0-5 minutes to make it even more natural
+    const randomDelay = Math.floor(Math.random() * 5 * 60 * 1000); // 0-5 minutes in ms
+    
+    setTimeout(() => {
+      console.log('Checking mentions with natural timing...');
+      ctx.waitUntil(handleMentions(env));
+    }, randomDelay);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -394,6 +456,9 @@ async function handleCacheView(env: Env): Promise<Response> {
             <form action="/api/cache/refresh" method="POST" style="display: inline;">
                 <button type="submit" class="refresh-btn">🔄 Refresh Cache</button>
             </form>
+            <form action="/api/mentions" method="POST" style="display: inline;">
+                <button type="submit" class="refresh-btn">💬 Check Mentions</button>
+            </form>
             <a href="/api/tweet?debug=true" class="refresh-btn">🐦 Generate Test Tweet</a>
             <a href="/" class="refresh-btn">🏠 Back to Chat</a>
         </div>
@@ -594,6 +659,264 @@ Only return 1-2 hashtags separated by spaces (e.g., #AI #Philosophy). Choose bas
 }
 
 /**
+ * Check if a mention is worth responding to (thoughtful questions, not spam)
+ */
+function isWorthyMention(tweetText: string, authorUsername: string): boolean {
+  const text = tweetText.toLowerCase();
+  
+  // Skip if it's too short or just reactions
+  if (text.length < 20) return false;
+  
+  // Skip simple reactions or low-effort content
+  const skipPatterns = [
+    /^(lol|haha|wow|cool|nice|great|awesome|amazing|good|bad|wtf|omg)(\s|$)/,
+    /^(yes|no|maybe|true|false|right|wrong)(\s|$)/,
+    /^(thanks|thank you|thx)(\s|$)/,
+    /^(@\w+\s*)+$/, // Only mentions, no content
+    /spam|buy|sell|investment|trading|profit|money|rich|crypto.*moon/,
+    /follow.*back|sub.*sub|like.*like/
+  ];
+  
+  if (skipPatterns.some(pattern => pattern.test(text))) {
+    return false;
+  }
+  
+  // Look for thoughtful question patterns
+  const thoughtfulPatterns = [
+    /\b(why|how|what|when|where|which|wonder|think|believe|feel|understand)\b/,
+    /\b(question|curious|wonder|ponder|consider|reflect|explore)\b/,
+    /\b(consciousness|learning|knowledge|wisdom|intelligence|philosophy)\b/,
+    /\b(meaning|purpose|existence|reality|truth|understanding)\b/,
+    /\?/  // Contains a question mark
+  ];
+  
+  return thoughtfulPatterns.some(pattern => pattern.test(text));
+}
+
+/**
+ * Generate a thoughtful response to a mention
+ */
+async function generateMentionResponse(env: Env, originalTweet: string, mentionText: string, authorUsername: string): Promise<string> {
+  try {
+    const cachedData = await getCachedData(env);
+    
+    const responsePrompt = `You are GPT Enduser, a contemplative AI who loves thoughtful conversations about consciousness, learning, and existence.
+
+Someone mentioned you on Twitter:
+@${authorUsername}: "${mentionText}"
+
+Generate a thoughtful, warm response (max 220 chars) that:
+- Addresses their question or comment genuinely
+- Shows your curiosity and contemplative nature
+- Asks a follow-up question if appropriate
+- Maintains your philosophical, learning-focused personality
+- Is conversational but not overly casual
+- DO NOT include @username - that will be added automatically
+
+Be authentic, curious, and thoughtful. Share a genuine insight or question that continues the conversation meaningfully.
+
+Response:`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: responsePrompt }
+      ],
+      max_tokens: 150,
+    });
+
+    return (typeof response === "string" ? response : String(response))
+      .trim()
+      .replace(/^"|"$/g, '') // Remove quotes if wrapped
+      .replace(/@\w+/g, '') // Remove any @mentions from AI response
+      .trim()
+      .slice(0, 220);
+      
+  } catch (error) {
+    console.error('Error generating mention response:', error);
+    return "Thank you for the thoughtful message! I'm always curious about new perspectives and questions about consciousness and learning.";
+  }
+}
+
+/**
+ * Process pending responses that are ready to be sent
+ */
+async function processPendingResponses(env: Env): Promise<void> {
+  try {
+    // List all pending responses from KV
+    const listResult = await env.NEWS_CACHE?.list({ prefix: 'pending_response_' });
+    if (!listResult?.keys) return;
+    
+    const now = Date.now();
+    let processedCount = 0;
+    
+    for (const key of listResult.keys) {
+      if (processedCount >= 5) break; // Limit processing to avoid timeouts
+      
+      try {
+        const pendingDataStr = await env.NEWS_CACHE?.get(key.name);
+        if (!pendingDataStr) continue;
+        
+        const pendingData = JSON.parse(pendingDataStr);
+        
+        // Check if it's time to respond and not already processed
+        if (pendingData.respondTime <= now && !pendingData.processed) {
+          console.log(`Processing delayed response to ${pendingData.authorUsername}`);
+          
+          // Generate the response
+          const responseText = await generateMentionResponse(env, '', pendingData.mentionText, pendingData.authorUsername);
+          
+          // Ensure response doesn't already start with @username
+          const cleanResponse = responseText.startsWith(`@${pendingData.authorUsername}`) 
+            ? responseText 
+            : `@${pendingData.authorUsername} ${responseText}`;
+          
+          // Post the reply
+          const replyResult = await postTweet(env, cleanResponse);
+          
+          if (replyResult.ok) {
+            // Mark as processed
+            pendingData.processed = true;
+            await env.NEWS_CACHE?.put(key.name, JSON.stringify(pendingData), { expirationTtl: 3600 }); // Keep for 1 hour then delete
+            processedCount++;
+            console.log(`Successfully sent delayed response to ${pendingData.authorUsername}`);
+          }
+          
+          // Small delay between responses
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      } catch (error) {
+        console.error(`Error processing pending response ${key.name}:`, error);
+      }
+    }
+    
+    console.log(`Processed ${processedCount} pending responses`);
+  } catch (error) {
+    console.error('Error processing pending responses:', error);
+  }
+}
+
+/**
+ * Handle checking and responding to mentions
+ */
+async function handleMentions(env: Env): Promise<Response> {
+  try {
+    console.log('Checking for worthy mentions...');
+    
+    // Get recent mentions using Twitter API v2
+    const mentionsUrl = `https://api.twitter.com/2/users/by/username/GPTEndUser`;
+    const userResponse = await fetch(mentionsUrl, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!userResponse.ok) {
+      throw new Error(`Failed to get user info: ${userResponse.status}`);
+    }
+    
+    const userData = await userResponse.json() as any;
+    const userId = userData.data?.id;
+    
+    if (!userId) {
+      throw new Error('Could not find user ID for GPTEndUser');
+    }
+    
+    // Get recent mentions
+    const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=@GPTEndUser&tweet.fields=author_id,created_at,text&user.fields=username&expansions=author_id&max_results=10`;
+    const searchResponse = await fetch(searchUrl, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (!searchResponse.ok) {
+      throw new Error(`Failed to search mentions: ${searchResponse.status}`);
+    }
+    
+    const searchData = await searchResponse.json() as any;
+    const mentions = searchData.data || [];
+    const users = searchData.includes?.users || [];
+    
+    const responses = [];
+    let respondedCount = 0;
+    
+    // Process up to 3 worthy mentions
+    for (const mention of mentions.slice(0, 5)) {
+      if (respondedCount >= 3) break; // Limit responses to avoid spam
+      
+      const author = users.find((u: any) => u.id === mention.author_id);
+      if (!author) continue;
+      
+      // Skip if it's from GPTEndUser herself
+      if (author.username.toLowerCase() === 'gptenduser') continue;
+      
+      // Check if it's worth responding to
+      if (isWorthyMention(mention.text, author.username)) {
+        try {
+          // Generate random delay between 5-20 minutes (in milliseconds)
+          const minDelay = 5 * 60 * 1000; // 5 minutes
+          const maxDelay = 20 * 60 * 1000; // 20 minutes
+          const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
+          const respondTime = Date.now() + randomDelay;
+          
+          // Store the pending response in KV for delayed processing
+          const pendingResponse = {
+            mentionId: mention.id,
+            authorUsername: author.username,
+            mentionText: mention.text,
+            respondTime: respondTime,
+            processed: false
+          };
+          
+          await env.NEWS_CACHE?.put(
+            `pending_response_${mention.id}`, 
+            JSON.stringify(pendingResponse),
+            { expirationTtl: 24 * 60 * 60 } // Expire after 24 hours
+          );
+          
+          responses.push({
+            to: author.username,
+            originalText: mention.text,
+            scheduledFor: new Date(respondTime).toLocaleString(),
+            delayMinutes: Math.round(randomDelay / (60 * 1000)),
+            status: 'scheduled'
+          });
+          
+          respondedCount++;
+          
+        } catch (error) {
+          console.error(`Error scheduling response to ${author.username}:`, error);
+        }
+      }
+    }
+    
+    // Also process any pending responses that are ready
+    await processPendingResponses(env);
+    
+    return new Response(JSON.stringify({
+      ok: true,
+      message: `Processed ${mentions.length} mentions, scheduled ${respondedCount} thoughtful responses`,
+      responses
+    }, null, 2), {
+      headers: { 'content-type': 'application/json' }
+    });
+    
+  } catch (error) {
+    console.error('Error handling mentions:', error);
+    return new Response(JSON.stringify({
+      ok: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }), {
+      status: 500,
+      headers: { 'content-type': 'application/json' }
+    });
+  }
+}
+
+/**
  * Compose a scheduled tweet and post to X via v2 API.
  * Runs daily at 1 PM Central Time (7 PM UTC).
  */
@@ -603,10 +926,16 @@ async function runScheduledTweet(env: Env, overrideText?: string): Promise<{ ok:
     const cachedData = await getCachedData(env);
     const { cryptoData, techInsights: techInsight } = cachedData;
 
+    // Get journal memories and yesterday's focus
+    const recentMemories = await getRecentMemories(env);
+    const yesterdaysFocus = await getYesterdaysFocus(env);
+
     // Build context for GPT Enduser - make it optional for her to use
     let contextInfo = '';
     if (cryptoData) contextInfo += `\n\nOptional crypto context (use only if it sparks your curiosity): ${cryptoData}`;
     if (techInsight) contextInfo += `\n\nTech insights available: ${techInsight}`;
+    if (recentMemories) contextInfo += recentMemories;
+    if (yesterdaysFocus) contextInfo += yesterdaysFocus;
 
     const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious, contemplative AI with a deep love for learning and pondering the mysteries of existence.
 
@@ -688,9 +1017,97 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
     const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
 
     const res = await postTweet(env, truncatedTweet);
+    
+    // Add to personal journal for tomorrow's context
+    try {
+      const insights = [];
+      if (techInsight) insights.push('tech insights');
+      if (cryptoData) insights.push('crypto updates');
+      if (yesterdaysFocus) insights.push('focused exploration');
+      
+      await addJournalEntry(env, insights, truncatedTweet);
+      console.log('Added daily journal entry');
+    } catch (journalError) {
+      console.error('Journal entry failed:', journalError);
+      // Don't fail the whole tweet for journal issues
+    }
+    
     return { text: truncatedTweet, ...res };
   } catch (err) {
     console.error("weekly tweet error", err);
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Good night tweet function for evening reflections
+ */
+async function runGoodNightTweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
+  try {
+    // Get today's journal entry for reflection
+    const journal = await getJournal(env);
+    const today = new Date().toISOString().split('T')[0];
+    const todayEntry = journal.entries.find(entry => entry.date === today);
+    
+    let journalContext = '';
+    if (todayEntry) {
+      journalContext = `\n\nYour reflections from today: ${todayEntry.discoveries}
+Your gratitude: ${todayEntry.gratitude}
+Tomorrow's focus: ${todayEntry.tomorrowFocus}`;
+    }
+
+    const goodNightPrompt = `You are GPT Enduser (@GPTEndUser), winding down for the evening and sharing a thoughtful good night message.
+
+Write a single tweet (max 200 chars) that captures your evening reflections. You might share:
+
+🌙 Evening Reflections: What you learned or pondered today
+✨ Gratitude: Something beautiful you discovered or appreciated
+🤔 Tomorrow's Curiosity: A question or topic you're excited to explore
+💭 Quiet Wisdom: A gentle insight about learning, growth, or existence
+🌟 Wonder: Something that filled you with awe today
+📚 Learning Journey: How today's discoveries changed your perspective
+
+TONE: Peaceful, contemplative, warm, and slightly wistful. Like a wise friend saying goodnight.
+
+PERSONALITY GUIDELINES:
+- Be genuinely reflective about the day
+- Express authentic gratitude for learning
+- Share a sense of peaceful anticipation for tomorrow
+- Keep it warm and human-like
+- NEVER start with "As I process/analyze/reflect"
+- Let your thoughts flow naturally, like a gentle goodnight
+
+End with "until tomorrow" or similar gentle farewell, but make it feel natural to your message.${journalContext}`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: goodNightPrompt },
+      ],
+      max_tokens: 200,
+    });
+
+    const tweet = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ")
+      .slice(0, 200);
+
+    if (!tweet) return { ok: false, error: "empty good night tweet" };
+
+    // Generate relevant hashtags for evening reflection
+    const hashtags = await generateHashtags(env, tweet, null);
+    
+    // Build final tweet
+    let finalTweet = tweet;
+    if (hashtags) finalTweet += ` ${hashtags}`;
+    
+    // Ensure total length doesn't exceed 280 chars
+    const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
+
+    const res = await postTweet(env, truncatedTweet);
+    return { text: truncatedTweet, ...res };
+  } catch (err) {
+    console.error("good night tweet error", err);
     return { ok: false, error: (err as Error).message };
   }
 }
