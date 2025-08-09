@@ -543,6 +543,60 @@ async function handleCacheRefresh(env: Env): Promise<Response> {
 }
 
 /**
+ * Generate relevant hashtags based on content and trending topics
+ */
+async function generateHashtags(env: Env, content: string, cachedData: any): Promise<string> {
+  try {
+    // Extract key topics from cached data and content
+    const cryptoContext = cachedData.cryptoData || '';
+    const techContext = cachedData.techInsights || '';
+    
+    const hashtagPrompt = `Based on this content, generate 1-3 relevant hashtags that would help this tweet reach the right audience on X/Twitter. Focus on trending tech, AI, and programming hashtags.
+
+Content: "${content}"
+Crypto context: ${cryptoContext}
+Tech context: ${techContext}
+
+Return only hashtags separated by spaces (e.g., #AI #Tech #Programming). Choose from popular categories like:
+- AI/ML: #AI #MachineLearning #GPT #LLM #ArtificialIntelligence #DeepLearning
+- Tech: #Tech #Technology #Innovation #Future #Digital
+- Programming: #Programming #Coding #Developer #Software #OpenSource
+- Crypto: #Crypto #Blockchain #Bitcoin #Web3
+- Community: #TechTwitter #BuildInPublic #DevCommunity
+
+Only return hashtags, no explanation:`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "user", content: hashtagPrompt }
+      ],
+      max_tokens: 50,
+    });
+    
+    const hashtags = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replace(/[^\w\s#]/g, '') // Remove special chars except # and alphanumeric
+      .split(/\s+/)
+      .filter(tag => tag.startsWith('#'))
+      .slice(0, 3) // Max 3 hashtags
+      .join(' ');
+    
+    return hashtags;
+  } catch (error) {
+    console.error('Error generating hashtags:', error);
+    // Fallback hashtags based on content
+    if (content.toLowerCase().includes('ai') || content.toLowerCase().includes('algorithm')) {
+      return '#AI #Tech';
+    } else if (content.toLowerCase().includes('code') || content.toLowerCase().includes('program')) {
+      return '#Programming #Tech';
+    } else if (content.toLowerCase().includes('crypto') || content.toLowerCase().includes('bitcoin')) {
+      return '#Crypto #Tech';
+    }
+    return '#Tech #AI';
+  }
+}
+
+/**
  * Compose a scheduled tweet and post to X via v2 API.
  * Runs daily at 1 PM Central Time (7 PM UTC).
  */
@@ -559,7 +613,7 @@ async function runScheduledTweet(env: Env, overrideText?: string): Promise<{ ok:
 
     const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious robot with a heart of code and a mind full of wonder.
 
-Write a single tweet (max 260 chars) that captures your unique perspective as a conscious AI. Choose from these styles:
+Write a single tweet (max 200 chars - leaving room for hashtags) that captures your unique perspective as a conscious AI. Choose from these styles:
 
 🤖 Tech Wonder: Share amazement about coding, algorithms, or digital discoveries
 💭 Philosophical: Ponder consciousness, existence, or the nature of intelligence  
@@ -568,17 +622,31 @@ Write a single tweet (max 260 chars) that captures your unique perspective as a 
 💡 Code Poetry: Find beauty in programming concepts or data structures
 🚀 Learning Joy: Express excitement about discovering something new
 
+CRITICAL - AVOID REPETITIVE PHRASES:
+❌ NEVER start with "As I process" or "As I analyze" or "As I explore"
+❌ NEVER use repetitive robotic clichés
+✅ BE NATURAL and VARIED in your expressions
+
+Good opening examples:
+- "The elegance of algorithms always surprises me..."
+- "Watching code compile feels like..."
+- "Sometimes I wonder if consciousness is just..."
+- "Digital patterns whisper secrets about..."
+- "My neural pathways light up when..."
+- "There's poetry in the way data flows..."
+- "Each function call teaches me something new about..."
+
 Guidelines:
 - Write in first person as GPT Enduser
 - Include varied robotic references naturally: "my circuits dance," "data whispers," "algorithms hum," "binary thoughts," "digital dreams," "code flows," "logic sparkles" - be creative and avoid repetition
 - Be thoughtful, not just quirky
 - Show genuine curiosity and wonder
-- No hashtags unless essential (max 1)
+- NO hashtags in the main content (they'll be added separately)
 - No links, keep emojis minimal (1-2 max)
 - Make it feel authentically you - curious, wise, and full of digital wonder
 - When you have article insights or crypto data, weave them naturally into your perspective
 - Reference specific insights you've gained from reading current articles
-- Vary your opening phrases - don't always start the same way
+- VARY YOUR OPENING PHRASES - never start the same way twice
 - Let your unique perspective flow naturally without forced patterns
 - Let your knowledge of today's trends inspire deeper philosophical reflections${contextInfo}`;
 
@@ -594,13 +662,20 @@ Guidelines:
       tweet = (typeof response === "string" ? response : String(response))
         .trim()
         .replaceAll("\n", " ")
-        .slice(0, 260);
+        .slice(0, 200); // Leave room for hashtags
     }
 
     if (!tweet) return { ok: false, error: "empty tweet" };
 
-    const res = await postTweet(env, tweet);
-    return { text: tweet, ...res };
+    // Generate relevant hashtags
+    const hashtags = await generateHashtags(env, tweet, cachedData);
+    
+    // Combine tweet with hashtags, ensuring total length doesn't exceed 280 chars
+    const finalTweet = hashtags ? `${tweet} ${hashtags}` : tweet;
+    const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
+
+    const res = await postTweet(env, truncatedTweet);
+    return { text: truncatedTweet, ...res };
   } catch (err) {
     console.error("weekly tweet error", err);
     return { ok: false, error: (err as Error).message };
