@@ -28,7 +28,8 @@
     "crons": [
       "0 19 * * *",          // Daily tweet at 1 PM Central Time (7 PM UTC)
       "30 2 * * *",          // Good night tweet at 9:30 PM Central (2:30 AM UTC)
-      "0 12 * * *"           // Morning DFW weather tweet at 7 AM Central (12 PM UTC)
+      "0 12 * * *",          // Morning DFW weather tweet at 7 AM Central (12 PM UTC)
+      "0 23 * * *"           // Evening DFW weather tweet at 6 PM Central (11 PM UTC)
     ]
   },
   "upload_source_maps": true

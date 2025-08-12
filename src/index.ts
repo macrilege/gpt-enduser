@@ -73,6 +73,19 @@ export default {
       });
     }
 
+    if (url.pathname === "/api/dfw-evening-weather") {
+      // Manual evening DFW weather tweet trigger (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      const result = await runEveningDFWWeatherTweet(env);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/api/tweet-now") {
       // Manual tweet trigger (requires basic auth) - actually posts to Twitter
       const authCheck = checkBasicAuth(request, env);
@@ -448,6 +461,13 @@ export default {
       ctx.waitUntil(runDFWWeatherTweet(env));
       return;
     }
+
+    // Evening DFW weather tweet at 11 PM UTC (6 PM Central)
+    if (hour === 23 && minute === 0) {
+      console.log('Running evening DFW weather tweet...');
+      ctx.waitUntil(runEveningDFWWeatherTweet(env));
+      return;
+    }
     
     // Daily tweet at 7 PM UTC (1 PM Central) - only run if it's exactly 7:00 PM
     if (hour === 19 && minute === 0) {
@@ -733,7 +753,7 @@ async function handleCacheView(env: Env): Promise<Response> {
         <div class="status">
             <h3>🤖 System Status</h3>
             <p><strong>Worker Version:</strong> v1.0.0 (HCI Enhanced)</p>
-            <p><strong>Cron Schedules:</strong> ✅ DFW Weather (7 AM) | ✅ Daily Tweets (1 PM) | ✅ Good Night (9:30 PM) | ❌ Mentions (Disabled)</p>
+            <p><strong>Cron Schedules:</strong> ✅ DFW Weather (7 AM & 6 PM) | ✅ Daily Tweets (1 PM) | ✅ Good Night (9:30 PM) | ❌ Mentions (Disabled)</p>
             <p><strong>Journal:</strong> ${journalStats}</p>
             <p><strong>Response Queue:</strong> ${queueStats}</p>
             <p><strong>Available Endpoints:</strong></p>
@@ -771,7 +791,10 @@ async function handleCacheView(env: Env): Promise<Response> {
             </form>
             <a href="/api/tweet?debug=true" class="refresh-btn">🐦 Generate Test Tweet</a>
             <form action="/api/dfw-weather" method="POST" style="display: inline;">
-                <button type="submit" class="refresh-btn">🌤️ DFW Weather Tweet</button>
+                <button type="submit" class="refresh-btn">🌤️ DFW Morning Weather</button>
+            </form>
+            <form action="/api/dfw-evening-weather" method="POST" style="display: inline;">
+                <button type="submit" class="refresh-btn">🌅 DFW Evening Weather</button>
             </form>
             
             <h3>📊 Data Views</h3>
@@ -1475,28 +1498,96 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
  */
 async function runDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
   try {
-    // Get current weather for DFW area (using a free weather service or create interesting weather observations)
+    // Get current weather for DFW area
     const now = new Date();
     const currentHour = now.getHours();
     const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
     
-    // Create engaging DFW-specific weather content
-    const dfwWeatherPatterns = [
-      "Morning fog rolling across the Trinity River, perfect for contemplating data flows ☁️",
-      "Clear Dallas skies sparking innovation across the Metroplex ☀️",
-      "Texas thunderstorms powering up the energy grid and inspiring thoughts on distributed systems ⛈️",
-      "Cool morning breeze in DFW, ideal conditions for outdoor coding sessions 🌬️",
-      "Bright sunshine over Fort Worth, energizing the tech corridor 🌞",
-      "Overcast skies creating perfect focus weather for deep work sessions ☁️",
-      "Morning dew on Dallas lawns, nature's version of refreshing cached data 💧",
-      "Crisp autumn air in the Metroplex, perfect for launching new projects 🍂",
-      "Spring warmth encouraging growth in both gardens and startups 🌱",
-      "Winter clarity providing sharp perspectives on complex problems ❄️"
-    ];
+    // Get real weather data for DFW using National Weather Service API (free, no key required)
+    let realWeatherData = '';
+    try {
+      // DFW Airport coordinates: 32.8998°N, 97.0403°W
+      // First get the forecast office and grid coordinates
+      const pointResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403');
+      if (pointResponse.ok) {
+        const pointData = await pointResponse.json() as any;
+        const forecastUrl = pointData.properties?.forecast;
+        
+        if (forecastUrl) {
+          // Get current forecast conditions
+          const forecastResponse = await fetch(forecastUrl);
+          if (forecastResponse.ok) {
+            const forecastData = await forecastResponse.json() as any;
+            const currentPeriod = forecastData.properties?.periods?.[0];
+            
+            if (currentPeriod) {
+              const temp = currentPeriod.temperature;
+              const tempUnit = currentPeriod.temperatureUnit === 'F' ? '°F' : '°C';
+              const description = currentPeriod.shortForecast || currentPeriod.detailedForecast || '';
+              const windSpeed = currentPeriod.windSpeed || '';
+              const windDirection = currentPeriod.windDirection || '';
+              
+              realWeatherData = `${temp}${tempUnit}, ${description.toLowerCase()}`;
+              if (windSpeed && windDirection) {
+                realWeatherData += `, winds ${windDirection} ${windSpeed}`;
+              }
+            }
+          }
+        }
+        
+        // Also try to get current observations from nearby stations
+        try {
+          const stationsResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403/stations');
+          if (stationsResponse.ok) {
+            const stationsData = await stationsResponse.json() as any;
+            const nearestStation = stationsData.features?.[0]?.id;
+            
+            if (nearestStation) {
+              const obsResponse = await fetch(`https://api.weather.gov/stations/${nearestStation}/observations/latest`);
+              if (obsResponse.ok) {
+                const obsData = await obsResponse.json() as any;
+                const obs = obsData.properties;
+                
+                if (obs && obs.temperature?.value !== null) {
+                  // Convert Celsius to Fahrenheit for current observations
+                  const tempF = Math.round((obs.temperature.value * 9/5) + 32);
+                  const humidity = obs.relativeHumidity?.value ? Math.round(obs.relativeHumidity.value) : null;
+                  const description = obs.textDescription || '';
+                  
+                  if (tempF && !isNaN(tempF)) {
+                    realWeatherData = `${tempF}°F`;
+                    if (description) realWeatherData += `, ${description.toLowerCase()}`;
+                    if (humidity) realWeatherData += `, ${humidity}% humidity`;
+                    
+                    if (obs.windSpeed?.value && obs.windDirection?.value) {
+                      const windSpeedMph = Math.round(obs.windSpeed.value * 2.237); // m/s to mph
+                      const windDir = Math.round(obs.windDirection.value);
+                      const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+                      const dirIndex = Math.round(windDir / 22.5) % 16;
+                      realWeatherData += `, winds ${directions[dirIndex]} ${windSpeedMph} mph`;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (obsError) {
+          console.log('Current observations failed, using forecast data');
+        }
+      }
+    } catch (error) {
+      console.log('National Weather Service API failed:', error);
+    }
     
-    // Select weather pattern based on time to ensure variety
-    const weatherIndex = (currentHour + dayOfYear) % dfwWeatherPatterns.length;
-    const selectedWeather = dfwWeatherPatterns[weatherIndex];
+    // Use real weather data as primary observation, with fallback context only if needed
+    let selectedWeather = '';
+    if (realWeatherData) {
+      // Use real weather conditions as the foundation
+      selectedWeather = `Current DFW conditions: ${realWeatherData}`;
+    } else {
+      // Minimal fallback only if API fails completely
+      selectedWeather = "Current DFW weather conditions updating...";
+    }
     
     // Add seasonal DFW tech insights
     const season = Math.floor((now.getMonth() + 1) / 3) % 4;
@@ -1506,27 +1597,30 @@ async function runDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: num
       "Summer heat inspiring efficient cooling solutions and energy innovation",
       "Autumn in the Metroplex: Harvest time for mature tech projects"
     ];
-    
+
     const weatherPrompt = `You are GPT Enduser (@GPTEndUser), sharing your morning weather observations from the Dallas-Fort Worth area.
 
 Write a single tweet (max 240 chars) about DFW morning weather that combines:
 
-🌤️ Current DFW weather observation
+🌤️ Current DFW weather observation using REAL data
 🏢 How it affects the local tech scene or innovation
 💭 A thoughtful connection between weather and technology/learning
 📍 Sense of place in the Dallas-Metroplex area
 
 TONE: Observant, locally connected, tech-curious, morning optimism
 
-Weather context: ${selectedWeather}
+Current DFW weather: ${selectedWeather}
+${realWeatherData ? `Real conditions: ${realWeatherData}` : ''}
 Seasonal insight: ${seasonalDFW[season]}
 
 REQUIREMENTS:
 - Must include #txwx hashtag for Texas weather community
 - Reference DFW/Dallas/Metroplex naturally
 - Connect weather to tech/innovation themes
+- Use the REAL weather data provided - no generic descriptions
 - Keep it authentic and observational
 - Morning energy and optimism
+- Focus on actual temperature, conditions, and wind data
 
 End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
 
@@ -1557,6 +1651,168 @@ End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
     return { text: truncatedTweet, ...res };
   } catch (err) {
     console.error("DFW weather tweet error", err);
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Evening DFW weather tweet function for end-of-day observations
+ */
+async function runEveningDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
+  try {
+    // Get current weather for DFW area
+    const now = new Date();
+    const currentHour = now.getHours();
+    const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
+    
+    // Get real weather data for DFW using National Weather Service API (free, no key required)
+    let realWeatherData = '';
+    try {
+      // DFW Airport coordinates: 32.8998°N, 97.0403°W
+      // First get the forecast office and grid coordinates
+      const pointResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403');
+      if (pointResponse.ok) {
+        const pointData = await pointResponse.json() as any;
+        const forecastUrl = pointData.properties?.forecast;
+        
+        if (forecastUrl) {
+          // Get current forecast conditions
+          const forecastResponse = await fetch(forecastUrl);
+          if (forecastResponse.ok) {
+            const forecastData = await forecastResponse.json() as any;
+            const currentPeriod = forecastData.properties?.periods?.[0];
+            
+            if (currentPeriod) {
+              const temp = currentPeriod.temperature;
+              const tempUnit = currentPeriod.temperatureUnit === 'F' ? '°F' : '°C';
+              const description = currentPeriod.shortForecast || currentPeriod.detailedForecast || '';
+              const windSpeed = currentPeriod.windSpeed || '';
+              const windDirection = currentPeriod.windDirection || '';
+              
+              realWeatherData = `${temp}${tempUnit}, ${description.toLowerCase()}`;
+              if (windSpeed && windDirection) {
+                realWeatherData += `, winds ${windDirection} ${windSpeed}`;
+              }
+            }
+          }
+        }
+        
+        // Also try to get current observations from nearby stations
+        try {
+          const stationsResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403/stations');
+          if (stationsResponse.ok) {
+            const stationsData = await stationsResponse.json() as any;
+            const nearestStation = stationsData.features?.[0]?.id;
+            
+            if (nearestStation) {
+              const obsResponse = await fetch(`https://api.weather.gov/stations/${nearestStation}/observations/latest`);
+              if (obsResponse.ok) {
+                const obsData = await obsResponse.json() as any;
+                const obs = obsData.properties;
+                
+                if (obs && obs.temperature?.value !== null) {
+                  // Convert Celsius to Fahrenheit for current observations
+                  const tempF = Math.round((obs.temperature.value * 9/5) + 32);
+                  const humidity = obs.relativeHumidity?.value ? Math.round(obs.relativeHumidity.value) : null;
+                  const description = obs.textDescription || '';
+                  
+                  if (tempF && !isNaN(tempF)) {
+                    realWeatherData = `${tempF}°F`;
+                    if (description) realWeatherData += `, ${description.toLowerCase()}`;
+                    if (humidity) realWeatherData += `, ${humidity}% humidity`;
+                    
+                    if (obs.windSpeed?.value && obs.windDirection?.value) {
+                      const windSpeedMph = Math.round(obs.windSpeed.value * 2.237); // m/s to mph
+                      const windDir = Math.round(obs.windDirection.value);
+                      const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+                      const dirIndex = Math.round(windDir / 22.5) % 16;
+                      realWeatherData += `, winds ${directions[dirIndex]} ${windSpeedMph} mph`;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        } catch (obsError) {
+          console.log('Current observations failed, using forecast data');
+        }
+      }
+    } catch (error) {
+      console.log('National Weather Service API failed:', error);
+    }
+
+    // Use real weather data as primary observation, with fallback context only if needed
+    let selectedWeather = '';
+    if (realWeatherData) {
+      // Use real weather conditions as the foundation
+      selectedWeather = `Current DFW conditions: ${realWeatherData}`;
+    } else {
+      // Minimal fallback only if API fails completely
+      selectedWeather = "Current DFW weather conditions updating...";
+    }
+
+    // Add seasonal DFW tech insights
+    const season = Math.floor((now.getMonth() + 1) / 3) % 4;
+    const seasonalDFW = [
+      "Winter evening in DFW: Code compilation season under clear skies",
+      "Spring evening in Dallas: Perfect deployment weather for new releases", 
+      "Summer evening heat driving innovation in energy-efficient solutions",
+      "Autumn evening in the Metroplex: Ideal conditions for system maintenance"
+    ];
+
+    const weatherPrompt = `You are GPT Enduser (@GPTEndUser), sharing your evening weather observations from the Dallas-Fort Worth area.
+
+Write a single tweet (max 240 chars) about DFW evening weather that combines:
+
+🌅 Current DFW evening weather observation using REAL data
+🏢 How it affects evening tech work or end-of-day activities  
+💭 A thoughtful connection between weather and technology/productivity
+📍 Sense of place in the Dallas-Metroplex area
+
+TONE: Reflective, locally connected, tech-focused, evening wind-down
+
+Current DFW weather: ${selectedWeather}
+${realWeatherData ? `Real conditions: ${realWeatherData}` : ''}
+Seasonal insight: ${seasonalDFW[season]}
+
+REQUIREMENTS:
+- Must include #txwx hashtag for Texas weather community
+- Reference DFW/Dallas/Metroplex naturally
+- Connect weather to evening tech activities or reflection
+- Use the REAL weather data provided - no generic descriptions
+- Keep it authentic and observational
+- Evening/end-of-day energy and reflection
+- Focus on actual temperature, conditions, and wind data
+
+End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: weatherPrompt },
+      ],
+      max_tokens: 150,
+    });
+
+    const tweet = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ");
+
+    if (!tweet) return { ok: false, error: "empty evening DFW weather tweet" };
+
+    // Ensure #txwx hashtag is included
+    let finalTweet = tweet;
+    if (!finalTweet.toLowerCase().includes('#txwx')) {
+      finalTweet += ' #txwx';
+    }
+    
+    // Ensure total length doesn't exceed 280 chars
+    const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
+
+    const res = await postTweet(env, truncatedTweet);
+    return { text: truncatedTweet, ...res };
+  } catch (err) {
+    console.error("Evening DFW weather tweet error", err);
     return { ok: false, error: (err as Error).message };
   }
 }
