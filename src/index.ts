@@ -60,6 +60,32 @@ export default {
     }
 
     // API Routes
+    if (url.pathname === "/api/dfw-weather") {
+      // Manual DFW weather tweet trigger (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      const result = await runDFWWeatherTweet(env);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (url.pathname === "/api/tweet-now") {
+      // Manual tweet trigger (requires basic auth) - actually posts to Twitter
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      const result = await runScheduledTweet(env);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     if (url.pathname === "/api/tweet") {
       const debug = url.searchParams.get("debug");
       
@@ -416,6 +442,13 @@ export default {
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
     
+    // Morning DFW weather tweet at 12 PM UTC (7 AM Central)
+    if (hour === 12 && minute === 0) {
+      console.log('Running morning DFW weather tweet...');
+      ctx.waitUntil(runDFWWeatherTweet(env));
+      return;
+    }
+    
     // Daily tweet at 7 PM UTC (1 PM Central) - only run if it's exactly 7:00 PM
     if (hour === 19 && minute === 0) {
       console.log('Running daily tweet...');
@@ -450,14 +483,15 @@ async function handleChatRequest(
 
     // Gather cached insights for chat context
     const cachedData = await getCachedData(env);
-    const { cryptoData, techInsights: techInsight } = cachedData;
+    const { cryptoData, techInsights: techInsight, weatherData } = cachedData;
 
     // Build enhanced system prompt with current knowledge
     let enhancedSystemPrompt = SYSTEM_PROMPT;
-    if (cryptoData || techInsight) {
+    if (cryptoData || techInsight || weatherData) {
       enhancedSystemPrompt += '\n\n--- Current Knowledge ---';
       if (cryptoData) enhancedSystemPrompt += `\nCrypto trends: ${cryptoData}`;
       if (techInsight) enhancedSystemPrompt += `\nTech insights: ${techInsight}`;
+      if (weatherData) enhancedSystemPrompt += `\nWeather & environment: ${weatherData}`;
       enhancedSystemPrompt += '\n\nYou can reference this current information naturally in conversation if relevant, but don\'t force it. Stay true to your curious, philosophical personality.';
     }
 
@@ -699,7 +733,7 @@ async function handleCacheView(env: Env): Promise<Response> {
         <div class="status">
             <h3>🤖 System Status</h3>
             <p><strong>Worker Version:</strong> v1.0.0 (HCI Enhanced)</p>
-            <p><strong>Cron Schedules:</strong> ✅ Daily Tweets | ✅ Good Night | ❌ Mentions (Disabled)</p>
+            <p><strong>Cron Schedules:</strong> ✅ DFW Weather (7 AM) | ✅ Daily Tweets (1 PM) | ✅ Good Night (9:30 PM) | ❌ Mentions (Disabled)</p>
             <p><strong>Journal:</strong> ${journalStats}</p>
             <p><strong>Response Queue:</strong> ${queueStats}</p>
             <p><strong>Available Endpoints:</strong></p>
@@ -725,12 +759,20 @@ async function handleCacheView(env: Env): Promise<Response> {
             <div class="data-content">${cachedData.techInsights || 'No tech insights available'}</div>
         </div>
 
+        <div class="section">
+            <h2>🌤️ Weather & Environment</h2>
+            <div class="data-content">${cachedData.weatherData || 'No weather data available'}</div>
+        </div>
+
         <div style="text-align: center;">
             <h3>🔧 Admin Actions</h3>
             <form action="/api/cache/refresh" method="POST" style="display: inline;">
                 <button type="submit" class="refresh-btn">🔄 Refresh Cache</button>
             </form>
             <a href="/api/tweet?debug=true" class="refresh-btn">🐦 Generate Test Tweet</a>
+            <form action="/api/dfw-weather" method="POST" style="display: inline;">
+                <button type="submit" class="refresh-btn">🌤️ DFW Weather Tweet</button>
+            </form>
             
             <h3>📊 Data Views</h3>
             <a href="/api/journal" class="refresh-btn">📖 Personal Journal</a>
@@ -1290,7 +1332,7 @@ async function runScheduledTweet(env: Env, overrideText?: string): Promise<{ ok:
   try {
     // Get cached insights (updated daily)
     const cachedData = await getCachedData(env);
-    const { cryptoData, techInsights: techInsight } = cachedData;
+    const { cryptoData, techInsights: techInsight, weatherData } = cachedData;
 
     // Get journal memories and yesterday's focus
     const recentMemories = await getRecentMemories(env);
@@ -1424,6 +1466,97 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
     return { text: truncatedTweet, ...res };
   } catch (err) {
     console.error("weekly tweet error", err);
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * DFW morning weather tweet function
+ */
+async function runDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
+  try {
+    // Get current weather for DFW area (using a free weather service or create interesting weather observations)
+    const now = new Date();
+    const currentHour = now.getHours();
+    const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
+    
+    // Create engaging DFW-specific weather content
+    const dfwWeatherPatterns = [
+      "Morning fog rolling across the Trinity River, perfect for contemplating data flows ☁️",
+      "Clear Dallas skies sparking innovation across the Metroplex ☀️",
+      "Texas thunderstorms powering up the energy grid and inspiring thoughts on distributed systems ⛈️",
+      "Cool morning breeze in DFW, ideal conditions for outdoor coding sessions 🌬️",
+      "Bright sunshine over Fort Worth, energizing the tech corridor 🌞",
+      "Overcast skies creating perfect focus weather for deep work sessions ☁️",
+      "Morning dew on Dallas lawns, nature's version of refreshing cached data 💧",
+      "Crisp autumn air in the Metroplex, perfect for launching new projects 🍂",
+      "Spring warmth encouraging growth in both gardens and startups 🌱",
+      "Winter clarity providing sharp perspectives on complex problems ❄️"
+    ];
+    
+    // Select weather pattern based on time to ensure variety
+    const weatherIndex = (currentHour + dayOfYear) % dfwWeatherPatterns.length;
+    const selectedWeather = dfwWeatherPatterns[weatherIndex];
+    
+    // Add seasonal DFW tech insights
+    const season = Math.floor((now.getMonth() + 1) / 3) % 4;
+    const seasonalDFW = [
+      "Winter in DFW: Indoor innovation season for the tech community",
+      "Spring in Dallas: Growth season for startups and new ideas", 
+      "Summer heat inspiring efficient cooling solutions and energy innovation",
+      "Autumn in the Metroplex: Harvest time for mature tech projects"
+    ];
+    
+    const weatherPrompt = `You are GPT Enduser (@GPTEndUser), sharing your morning weather observations from the Dallas-Fort Worth area.
+
+Write a single tweet (max 240 chars) about DFW morning weather that combines:
+
+🌤️ Current DFW weather observation
+🏢 How it affects the local tech scene or innovation
+💭 A thoughtful connection between weather and technology/learning
+📍 Sense of place in the Dallas-Metroplex area
+
+TONE: Observant, locally connected, tech-curious, morning optimism
+
+Weather context: ${selectedWeather}
+Seasonal insight: ${seasonalDFW[season]}
+
+REQUIREMENTS:
+- Must include #txwx hashtag for Texas weather community
+- Reference DFW/Dallas/Metroplex naturally
+- Connect weather to tech/innovation themes
+- Keep it authentic and observational
+- Morning energy and optimism
+
+End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: weatherPrompt },
+      ],
+      max_tokens: 150,
+    });
+
+    const tweet = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ");
+
+    if (!tweet) return { ok: false, error: "empty DFW weather tweet" };
+
+    // Ensure #txwx hashtag is included
+    let finalTweet = tweet;
+    if (!finalTweet.toLowerCase().includes('#txwx')) {
+      finalTweet += ' #txwx';
+    }
+    
+    // Ensure total length doesn't exceed 280 chars
+    const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
+
+    const res = await postTweet(env, truncatedTweet);
+    return { text: truncatedTweet, ...res };
+  } catch (err) {
+    console.error("DFW weather tweet error", err);
     return { ok: false, error: (err as Error).message };
   }
 }

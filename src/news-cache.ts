@@ -17,6 +17,7 @@ const MODEL_ID = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const CACHE_KEYS = {
   CRYPTO_DATA: 'daily_crypto_data',
   TECH_INSIGHTS: 'daily_tech_insights',
+  WEATHER_DATA: 'daily_weather_data',
   LAST_UPDATE: 'cache_last_update'
 };
 
@@ -39,6 +40,7 @@ interface HackerNewsStory {
 export interface CachedData {
   cryptoData: string;
   techInsights: string;
+  weatherData: string;
   lastUpdate: number;
 }
 
@@ -60,18 +62,75 @@ async function isCacheValid(env: Env): Promise<boolean> {
 }
 
 /**
+ * Fetch current weather data for multiple interesting locations
+ */
+async function fetchWeatherData(): Promise<string> {
+  try {
+    // Get weather for a few interesting tech cities (using free OpenWeatherMap API)
+    const cities = [
+      { name: 'San Francisco', lat: 37.7749, lon: -122.4194 },
+      { name: 'Seattle', lat: 47.6062, lon: -122.3321 },
+      { name: 'New York', lat: 40.7128, lon: -74.0060 },
+      { name: 'Austin', lat: 30.2672, lon: -97.7431 }
+    ];
+    
+    const insights: string[] = [];
+    
+    // For now, create interesting weather observations without API calls
+    // (You could add an OpenWeatherMap API key later if desired)
+    const currentHour = new Date().getHours();
+    const dayOfYear = Math.floor((Date.now() - new Date(new Date().getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
+    
+    const weatherPatterns = [
+      "Clear skies fostering outdoor innovation sessions ☀️",
+      "Perfect coding weather with gentle rain sounds 🌧️",
+      "Crisp autumn air energizing tech meetups 🍂",
+      "Morning fog lifting over Silicon Valley startups 🌫️",
+      "Snow-covered landscapes inspiring winter hackathons ❄️",
+      "Spring thunderstorms powering data center thoughts ⛈️",
+      "Golden hour perfect for outdoor team standups 🌅",
+      "Overcast skies ideal for deep focus sessions ☁️"
+    ];
+    
+    const weatherIndex = (currentHour + dayOfYear) % weatherPatterns.length;
+    const selectedWeather = weatherPatterns[weatherIndex];
+    
+    // Add a seasonal tech connection
+    const season = Math.floor((new Date().getMonth() + 1) / 3) % 4;
+    const seasonalInsights = [
+      "Winter: Indoor coding marathons and AI model training sessions",
+      "Spring: Open source projects blooming with fresh contributors", 
+      "Summer: Outdoor dev conferences and mobile app innovations",
+      "Autumn: Harvest season for startup launches and product releases"
+    ];
+    
+    insights.push(selectedWeather);
+    insights.push(seasonalInsights[season]);
+    
+    return insights.join(' | ');
+    
+  } catch (error) {
+    console.error('Error generating weather insights:', error);
+    return 'Perfect weather for contemplating the intersection of nature and technology 🌍';
+  }
+}
+
+/**
  * Fetch trending crypto data from multiple sources
  */
 async function fetchCryptoData(): Promise<string> {
   try {
-    // Get trending coins and recent news
-    const [trendingResponse, newsResponse] = await Promise.all([
+    // Get trending coins, market data, and news
+    const [trendingResponse, newsResponse, marketResponse] = await Promise.all([
       fetch('https://api.coingecko.com/api/v3/search/trending'),
-      fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=5&page=1&sparkline=false&price_change_percentage=24h')
+      fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=5&page=1&sparkline=false&price_change_percentage=24h'),
+      // Get top crypto news from CryptoCompare (free tier)
+      fetch('https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest&limit=3')
     ]);
     
     const insights: string[] = [];
     
+    // Trending coin data
     if (trendingResponse.ok) {
       const trendingData = await trendingResponse.json() as any;
       if (trendingData.coins && trendingData.coins.length > 0) {
@@ -82,6 +141,7 @@ async function fetchCryptoData(): Promise<string> {
       }
     }
     
+    // Market cap leader
     if (newsResponse.ok) {
       const marketData = await newsResponse.json() as any;
       if (marketData && marketData.length > 0) {
@@ -89,6 +149,18 @@ async function fetchCryptoData(): Promise<string> {
         const change = topCrypto.price_change_percentage_24h || 0;
         const direction = change > 0 ? '🟢' : change < 0 ? '🔴' : '⚪';
         insights.push(`${topCrypto.name} ${direction} $${topCrypto.current_price.toLocaleString()}`);
+      }
+    }
+    
+    // Top crypto news
+    if (marketResponse.ok) {
+      const newsData = await marketResponse.json() as any;
+      if (newsData.Data && newsData.Data.length > 0) {
+        // Get the most relevant/recent news item
+        const topNews = newsData.Data[0];
+        const title = topNews.title;
+        const source = topNews.source_info?.name || 'Crypto News';
+        insights.push(`"${title.slice(0, 60)}..." - ${source}`);
       }
     }
     
@@ -354,10 +426,11 @@ async function updateCache(env: Env): Promise<void> {
     console.log('Updating news cache with diverse sources...');
     
     // Fetch data from multiple sources in parallel
-    const [cryptoData, hackerNewsInsights, techNews] = await Promise.all([
+    const [cryptoData, hackerNewsInsights, techNews, weatherData] = await Promise.all([
       fetchCryptoData(),
       fetchTechInsights(env), // Hacker News API
-      fetchTechNews() // GitHub + curated tech trends
+      fetchTechNews(), // GitHub + curated tech trends
+      fetchWeatherData() // Weather insights
     ]);
     
     // Combine tech insights from multiple sources
@@ -371,6 +444,7 @@ async function updateCache(env: Env): Promise<void> {
     await Promise.all([
       env.NEWS_CACHE?.put(CACHE_KEYS.CRYPTO_DATA, cryptoData),
       env.NEWS_CACHE?.put(CACHE_KEYS.TECH_INSIGHTS, combinedTechInsights),
+      env.NEWS_CACHE?.put(CACHE_KEYS.WEATHER_DATA, weatherData),
       env.NEWS_CACHE?.put(CACHE_KEYS.LAST_UPDATE, now.toString())
     ]);
     
@@ -405,15 +479,17 @@ export async function getCachedData(env: Env): Promise<CachedData> {
     }
     
     // Retrieve cached data
-    const [cryptoData, techInsights, lastUpdateStr] = await Promise.all([
+    const [cryptoData, techInsights, weatherData, lastUpdateStr] = await Promise.all([
       env.NEWS_CACHE?.get(CACHE_KEYS.CRYPTO_DATA),
       env.NEWS_CACHE?.get(CACHE_KEYS.TECH_INSIGHTS),
+      env.NEWS_CACHE?.get(CACHE_KEYS.WEATHER_DATA),
       env.NEWS_CACHE?.get(CACHE_KEYS.LAST_UPDATE)
     ]);
     
     return {
       cryptoData: cryptoData || '',
       techInsights: techInsights || '',
+      weatherData: weatherData || '',
       lastUpdate: parseInt(lastUpdateStr || '0')
     };
   } catch (error) {
@@ -422,6 +498,7 @@ export async function getCachedData(env: Env): Promise<CachedData> {
     return {
       cryptoData: '',
       techInsights: '',
+      weatherData: '',
       lastUpdate: 0
     };
   }
