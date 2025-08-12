@@ -209,6 +209,83 @@ export default {
           });
         }
       }
+    }
+
+    if (url.pathname === "/api/status") {
+      // Public endpoint to check system status including rate limits
+      if (request.method === "GET") {
+        try {
+          const now = Date.now();
+          
+          // Check rate limit status
+          const lastRateLimit = await env.NEWS_CACHE.get('mention_rate_limit');
+          let rateLimitStatus = 'OK';
+          let rateLimitInfo = '';
+          
+          if (lastRateLimit) {
+            const lastTime = parseInt(lastRateLimit);
+            const timeSince = now - lastTime;
+            const fiveMinutes = 5 * 60 * 1000;
+            
+            if (timeSince < fiveMinutes) {
+              rateLimitStatus = 'RATE_LIMITED';
+              const remainingTime = Math.ceil((fiveMinutes - timeSince) / 1000 / 60);
+              rateLimitInfo = `Backing off for ${remainingTime} more minutes`;
+            } else {
+              rateLimitStatus = 'RECOVERED';
+              rateLimitInfo = `Recovered ${Math.floor(timeSince / 1000 / 60)} minutes ago`;
+            }
+          }
+          
+          // Check recent responses instead of pending queue
+          const listResult = await env.NEWS_CACHE?.list({ prefix: 'responded_' });
+          const totalResponses = listResult?.keys?.length || 0;
+          
+          // Check journal status
+          const journal = await getJournal(env);
+          
+          const status = {
+            timestamp: new Date().toISOString(),
+            system: 'OPERATIONAL',
+            rateLimits: {
+              status: rateLimitStatus,
+              info: rateLimitInfo,
+              lastHit: lastRateLimit ? new Date(parseInt(lastRateLimit)).toISOString() : null
+            },
+            mentionResponse: {
+              mode: 'IMMEDIATE',
+              totalResponses: totalResponses,
+              status: 'Active - responding to mentions as they arrive',
+              checkFrequency: 'Every 5 minutes with natural variation'
+            },
+            journal: {
+              totalEntries: journal.totalEntries,
+              currentStreak: journal.currentStreak,
+              lastEntry: journal.entries[0]?.date || null
+            },
+            nextActions: {
+              mentionCheck: rateLimitStatus === 'RATE_LIMITED' ? 'Waiting for rate limit recovery' : 'Ready for next cron',
+              tweetGeneration: 'Scheduled for daily cron',
+              responseMode: 'Simple one-mention-at-a-time processing'
+            }
+          };
+          
+          return new Response(JSON.stringify(status, null, 2), {
+            headers: { 
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*"
+            }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ 
+            error: "Failed to get status", 
+            details: error instanceof Error ? error.message : String(error)
+          }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
       return new Response("Method not allowed", { status: 405 });
     }
 
@@ -509,11 +586,23 @@ async function handleCacheView(env: Env): Promise<Response> {
     }
     
     try {
-      const listResult = await env.NEWS_CACHE?.list({ prefix: 'pending_response_' });
-      const pendingCount = listResult?.keys?.length || 0;
-      queueStats = `${pendingCount} pending responses`;
+      // Count recent responses (last 24 hours) instead of pending queue
+      const listResult = await env.NEWS_CACHE?.list({ prefix: 'responded_' });
+      const totalResponses = listResult?.keys?.length || 0;
+      const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+      
+      // Count recent responses by checking timestamps in key names
+      let recentResponses = 0;
+      if (listResult?.keys) {
+        for (const key of listResult.keys) {
+          // Keys are like responded_12345, we can't get exact timestamps but can count total
+          recentResponses = totalResponses; // For now, show total recent responses
+        }
+      }
+      
+      queueStats = `${totalResponses} total responses tracked, immediate response mode active`;
     } catch (error) {
-      queueStats = 'Unable to load queue stats';
+      queueStats = 'Unable to load response stats';
     }
     
     const html = `
@@ -1067,15 +1156,15 @@ async function handleMentions(env: Env): Promise<Response> {
       throw new Error('Could not find user ID for GPTEndUser');
     }
     
-    // Get recent mentions with rate limit handling
-    const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=@GPTEndUser&tweet.fields=author_id,created_at,text&user.fields=username&expansions=author_id&max_results=10`;
+    // Get recent mentions with minimal rate limit impact - just get 1 new mention
+    const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=@GPTEndUser&tweet.fields=author_id,created_at,text&user.fields=username&expansions=author_id&max_results=1`;
     const searchResponse = await fetch(searchUrl, {
       headers: {
         'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY}`,
         'Content-Type': 'application/json'
       }
     });
-    
+
     if (!searchResponse.ok) {
       if (searchResponse.status === 429) {
         console.log('Rate limited on mention search, will try again later...');
@@ -1088,85 +1177,94 @@ async function handleMentions(env: Env): Promise<Response> {
       }
       throw new Error(`Failed to search mentions: ${searchResponse.status}`);
     }
-    
+
     const searchData = await searchResponse.json() as any;
     const mentions = searchData.data || [];
     const users = searchData.includes?.users || [];
-    
-    const responses = [];
-    let respondedCount = 0;
-    
-    // Process up to 3 worthy mentions
-    for (const mention of mentions.slice(0, 5)) {
-      if (respondedCount >= 3) break; // Limit responses to avoid spam
-      
+
+    // Process only the single most recent mention to avoid rate limits
+    if (mentions.length > 0) {
+      const mention = mentions[0]; // Just take the first (most recent) mention
       const author = users.find((u: any) => u.id === mention.author_id);
-      if (!author) continue;
       
-      // Skip if it's from GPTEndUser herself
-      if (author.username.toLowerCase() === 'gptenduser') continue;
-      
-      // Check if we already have a pending response for this mention
-      const existingPending = await env.NEWS_CACHE?.get(`pending_response_${mention.id}`);
-      if (existingPending) {
-        console.log(`Skipping mention ${mention.id} - already queued for response`);
-        continue;
-      }
-      
-      // Check if we've already responded to this mention (look for processed responses)
-      const processedResponse = await env.NEWS_CACHE?.get(`responded_${mention.id}`);
-      if (processedResponse) {
-        console.log(`Skipping mention ${mention.id} - already responded`);
-        continue;
-      }
-      
-      // Check if it's worth responding to
-      if (isWorthyMention(mention.text, author.username)) {
-        try {
-          // Generate random delay between 5-20 minutes (in milliseconds)
-          const minDelay = 5 * 60 * 1000; // 5 minutes
-          const maxDelay = 20 * 60 * 1000; // 20 minutes
-          const randomDelay = Math.floor(Math.random() * (maxDelay - minDelay)) + minDelay;
-          const respondTime = Date.now() + randomDelay;
-          
-          // Store the pending response in KV for delayed processing
-          const pendingResponse = {
-            mentionId: mention.id,
-            authorUsername: author.username,
-            mentionText: mention.text,
-            respondTime: respondTime,
-            processed: false
-          };
-          
-          await env.NEWS_CACHE?.put(
-            `pending_response_${mention.id}`, 
-            JSON.stringify(pendingResponse),
-            { expirationTtl: 24 * 60 * 60 } // Expire after 24 hours
-          );
-          
-          responses.push({
-            to: author.username,
-            originalText: mention.text,
-            scheduledFor: new Date(respondTime).toLocaleString(),
-            delayMinutes: Math.round(randomDelay / (60 * 1000)),
-            status: 'scheduled'
+      if (author && author.username.toLowerCase() !== 'gptenduser') {
+        // Check if we've already responded to this mention
+        const processedResponse = await env.NEWS_CACHE?.get(`responded_${mention.id}`);
+        if (processedResponse) {
+          console.log(`Skipping mention ${mention.id} - already responded`);
+          return new Response(JSON.stringify({
+            ok: true,
+            message: `Mention already processed`,
+            mention: mention.id
+          }), {
+            headers: { 'content-type': 'application/json' }
           });
-          
-          respondedCount++;
-          
-        } catch (error) {
-          console.error(`Error scheduling response to ${author.username}:`, error);
+        }
+
+        // Check if it's worth responding to
+        if (isWorthyMention(mention.text, author.username)) {
+          try {
+            console.log(`Responding immediately to worthy mention from ${author.username}`);
+
+            // Generate the response
+            const responseText = await generateMentionResponse(env, '', mention.text, author.username);
+
+            // Ensure response doesn't already start with @username
+            const cleanResponse = responseText.startsWith(`@${author.username}`) 
+              ? responseText 
+              : `@${author.username} ${responseText}`;
+
+            // Post the reply immediately
+            const replyResult = await postTweet(env, cleanResponse);
+
+            if (replyResult.ok) {
+              // Track that we've responded to this mention to prevent duplicates
+              await env.NEWS_CACHE?.put(`responded_${mention.id}`, 'true', { expirationTtl: 7 * 24 * 60 * 60 }); // Keep for 7 days
+
+              console.log(`Successfully replied to ${author.username}`);
+
+              return new Response(JSON.stringify({
+                ok: true,
+                message: `Responded to mention from ${author.username}`,
+                response: {
+                  to: author.username,
+                  originalText: mention.text,
+                  reply: cleanResponse,
+                  status: 'sent'
+                }
+              }, null, 2), {
+                headers: { 'content-type': 'application/json' }
+              });
+            } else {
+              throw new Error(`Failed to post reply: ${replyResult.status} - ${replyResult.body}`);
+            }
+
+          } catch (error) {
+            console.error(`Error responding to ${author.username}:`, error);
+            return new Response(JSON.stringify({
+              ok: false,
+              error: `Failed to respond to ${author.username}: ${error instanceof Error ? error.message : 'Unknown error'}`
+            }), {
+              status: 500,
+              headers: { 'content-type': 'application/json' }
+            });
+          }
+        } else {
+          return new Response(JSON.stringify({
+            ok: true,
+            message: `Mention from ${author.username} not worthy of response`,
+            mention: mention.text
+          }), {
+            headers: { 'content-type': 'application/json' }
+          });
         }
       }
     }
     
-    // Also process any pending responses that are ready
-    await processPendingResponses(env);
-    
     return new Response(JSON.stringify({
       ok: true,
-      message: `Processed ${mentions.length} mentions, scheduled ${respondedCount} thoughtful responses`,
-      responses
+      message: `No new mentions found to process`,
+      mentions: mentions.length
     }, null, 2), {
       headers: { 'content-type': 'application/json' }
     });
