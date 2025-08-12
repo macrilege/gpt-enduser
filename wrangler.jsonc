@@ -27,8 +27,7 @@
   "triggers": {
     "crons": [
       "0 19 * * *",          // Daily tweet at 1 PM Central Time (7 PM UTC)
-      "30 3 * * *",          // Good night tweet at 9:30 PM Central (3:30 AM UTC)
-      "3,8,13,18,23,28,33,38,43,48,53,58 * * * *"  // Check mentions every 5 minutes with natural timing variation
+      "30 2 * * *"           // Good night tweet at 9:30 PM Central (2:30 AM UTC)
     ]
   },
   "upload_source_maps": true

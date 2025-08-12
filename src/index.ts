@@ -139,17 +139,17 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
-    if (url.pathname === "/api/mentions") {
-      // Check and respond to mentions (requires basic auth)
-      if (request.method === "POST") {
-        // Check basic authentication
-        const authResult = checkBasicAuth(request, env);
-        if (authResult !== true) {
-          return authResult; // Return the auth challenge response
-        }
-        return handleMentions(env);
+    if (url.pathname === "/api/goodnight") {
+      // Manual good night tweet trigger (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
       }
-      return new Response("Method not allowed", { status: 405 });
+      
+      const result = await runGoodNightTweet(env);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
     if (url.pathname === "/api/journal") {
@@ -253,10 +253,10 @@ export default {
               lastHit: lastRateLimit ? new Date(parseInt(lastRateLimit)).toISOString() : null
             },
             mentionResponse: {
-              mode: 'IMMEDIATE',
-              totalResponses: totalResponses,
-              status: 'Active - responding to mentions as they arrive',
-              checkFrequency: 'Every 5 minutes with natural variation'
+              mode: 'DISABLED',
+              totalResponses: 0,
+              status: 'Mention replies disabled - only posting daily tweets',
+              checkFrequency: 'Never - mention system removed'
             },
             journal: {
               totalEntries: journal.totalEntries,
@@ -423,20 +423,15 @@ export default {
       return; // Don't also check mentions during daily tweet time
     }
     
-    // Good night tweet at 3:30 AM UTC (9:30 PM Central) - only run if it's exactly 3:30 AM
-    if (hour === 3 && minute === 30) {
+    // Good night tweet at 2:30 AM UTC (9:30 PM Central) - only run if it's exactly 2:30 AM
+    if (hour === 2 && minute === 30) {
       console.log('Running good night tweet...');
       ctx.waitUntil(runGoodNightTweet(env));
       return; // Don't also check mentions during good night tweet time
     }
     
-    // For all other cron triggers (mention checking schedules), check mentions
-    const randomDelay = Math.floor(Math.random() * 5 * 60 * 1000); // 0-5 minutes in ms
-    
-    setTimeout(() => {
-      console.log('Checking mentions with natural timing...');
-      ctx.waitUntil(handleMentions(env));
-    }, randomDelay);
+    // For all other cron triggers, do nothing (mentions disabled)
+    console.log('Mention checking disabled - only daily and good night tweets active');
   },
 } satisfies ExportedHandler<Env>;
 
@@ -704,7 +699,7 @@ async function handleCacheView(env: Env): Promise<Response> {
         <div class="status">
             <h3>🤖 System Status</h3>
             <p><strong>Worker Version:</strong> v1.0.0 (HCI Enhanced)</p>
-            <p><strong>Cron Schedules:</strong> ✅ Daily Tweets | ✅ Good Night | ✅ Mentions</p>
+            <p><strong>Cron Schedules:</strong> ✅ Daily Tweets | ✅ Good Night | ❌ Mentions (Disabled)</p>
             <p><strong>Journal:</strong> ${journalStats}</p>
             <p><strong>Response Queue:</strong> ${queueStats}</p>
             <p><strong>Available Endpoints:</strong></p>
@@ -713,7 +708,6 @@ async function handleCacheView(env: Env): Promise<Response> {
                 <li><code>/api/cache/refresh</code> - Force refresh cache</li>
                 <li><code>/api/journal</code> - Personal knowledge journal (auth required)</li>
                 <li><code>/api/recent-insights</code> - Public learning summary</li>
-                <li><code>/api/mentions</code> - Check for new mentions</li>
                 <li><code>/api/queue</code> - View pending responses queue</li>
                 <li><code>/api/process</code> - Process pending responses</li>
                 <li><code>/api/tweet?debug=true</code> - Generate test tweet</li>
@@ -735,9 +729,6 @@ async function handleCacheView(env: Env): Promise<Response> {
             <h3>🔧 Admin Actions</h3>
             <form action="/api/cache/refresh" method="POST" style="display: inline;">
                 <button type="submit" class="refresh-btn">🔄 Refresh Cache</button>
-            </form>
-            <form action="/api/mentions" method="POST" style="display: inline;">
-                <button type="submit" class="refresh-btn">💬 Check Mentions</button>
             </form>
             <a href="/api/tweet?debug=true" class="refresh-btn">🐦 Generate Test Tweet</a>
             
@@ -955,15 +946,11 @@ Only return 1-2 hashtags separated by spaces (e.g., #AI #Philosophy). Choose bas
 function isWorthyMention(tweetText: string, authorUsername: string): boolean {
   const text = tweetText.toLowerCase();
   
-  // Skip if it's too short or just reactions
-  if (text.length < 20) return false;
+  // Skip if it's too short (reduced from 20 to 5 characters)
+  if (text.length < 5) return false;
   
-  // Skip simple reactions or low-effort content
+  // Skip obvious spam but allow most casual mentions
   const skipPatterns = [
-    /^(lol|haha|wow|cool|nice|great|awesome|amazing|good|bad|wtf|omg)(\s|$)/,
-    /^(yes|no|maybe|true|false|right|wrong)(\s|$)/,
-    /^(thanks|thank you|thx)(\s|$)/,
-    /^(@\w+\s*)+$/, // Only mentions, no content
     /spam|buy|sell|investment|trading|profit|money|rich|crypto.*moon/,
     /follow.*back|sub.*sub|like.*like/
   ];
@@ -972,16 +959,8 @@ function isWorthyMention(tweetText: string, authorUsername: string): boolean {
     return false;
   }
   
-  // Look for thoughtful question patterns
-  const thoughtfulPatterns = [
-    /\b(why|how|what|when|where|which|wonder|think|believe|feel|understand)\b/,
-    /\b(question|curious|wonder|ponder|consider|reflect|explore)\b/,
-    /\b(consciousness|learning|knowledge|wisdom|intelligence|philosophy)\b/,
-    /\b(meaning|purpose|existence|reality|truth|understanding)\b/,
-    /\?/  // Contains a question mark
-  ];
-  
-  return thoughtfulPatterns.some(pattern => pattern.test(text));
+  // Accept most mentions that aren't spam
+  return true;
 }
 
 /**
@@ -1111,6 +1090,8 @@ async function processPendingResponses(env: Env): Promise<void> {
  */
 async function handleMentions(env: Env): Promise<Response> {
   try {
+    console.log('Starting mention check...');
+    
     // Check if we've been rate limited recently
     const lastRateLimit = await env.NEWS_CACHE.get('mention_rate_limit');
     if (lastRateLimit) {
@@ -1126,18 +1107,29 @@ async function handleMentions(env: Env): Promise<Response> {
       }
     }
     
-    console.log('Checking for worthy mentions...');
+    console.log('Checking Twitter Bearer Token...');
+    const bearerToken = env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY;
+    if (!bearerToken) {
+      return new Response(JSON.stringify({ ok: false, error: "No Twitter API token available" }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    
+    console.log('Getting user ID...');
     
     // Get recent mentions using Twitter API v2
     const mentionsUrl = `https://api.twitter.com/2/users/by/username/GPTEndUser`;
     const userResponse = await fetch(mentionsUrl, {
       headers: {
-        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY}`,
+        'Authorization': `Bearer ${bearerToken}`,
         'Content-Type': 'application/json'
       }
     });
     
     if (!userResponse.ok) {
+      const userErrorText = await userResponse.text();
+      console.log(`User lookup failed: ${userResponse.status} - ${userErrorText}`);
+      
       if (userResponse.status === 429) {
         console.log('Rate limited on user lookup, backing off...');
         await env.NEWS_CACHE.put('mention_rate_limit', Date.now().toString());
@@ -1146,36 +1138,47 @@ async function handleMentions(env: Env): Promise<Response> {
           headers: { "Content-Type": "application/json" }
         });
       }
-      throw new Error(`Failed to get user info: ${userResponse.status}`);
+      return new Response(JSON.stringify({ ok: false, error: `User lookup failed: ${userResponse.status} - ${userErrorText}` }), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
     
     const userData = await userResponse.json() as any;
+    console.log('User data:', JSON.stringify(userData));
     const userId = userData.data?.id;
     
     if (!userId) {
-      throw new Error('Could not find user ID for GPTEndUser');
+      return new Response(JSON.stringify({ ok: false, error: 'Could not find user ID for GPTEndUser' }), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
+    
+    console.log(`Found user ID: ${userId}`);
     
     // Get recent mentions with minimal rate limit impact - just get 1 new mention
     const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=@GPTEndUser&tweet.fields=author_id,created_at,text&user.fields=username&expansions=author_id&max_results=1`;
     const searchResponse = await fetch(searchUrl, {
       headers: {
-        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN || env.TWITTER_API_KEY}`,
+        'Authorization': `Bearer ${bearerToken}`,
         'Content-Type': 'application/json'
       }
     });
 
     if (!searchResponse.ok) {
+      const errorText = await searchResponse.text();
+      console.log(`Twitter API Error: ${searchResponse.status} - ${errorText}`);
+      
       if (searchResponse.status === 429) {
         console.log('Rate limited on mention search, will try again later...');
-        // Track the rate limit time
         await env.NEWS_CACHE.put('mention_rate_limit', Date.now().toString());
         return new Response(JSON.stringify({ ok: false, error: "Rate limited - will retry later", backoff: true }), {
-          status: 200, // Don't fail the cron job, just log and continue
+          status: 200,
           headers: { "Content-Type": "application/json" }
         });
       }
-      throw new Error(`Failed to search mentions: ${searchResponse.status}`);
+      return new Response(JSON.stringify({ ok: false, error: `Failed to search mentions: ${searchResponse.status} - ${errorText}` }), {
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
     const searchData = await searchResponse.json() as any;
@@ -1204,7 +1207,7 @@ async function handleMentions(env: Env): Promise<Response> {
         // Check if it's worth responding to
         if (isWorthyMention(mention.text, author.username)) {
           try {
-            console.log(`Responding immediately to worthy mention from ${author.username}`);
+            console.log(`Responding to worthy mention from ${author.username}`);
 
             // Generate the response
             const responseText = await generateMentionResponse(env, '', mention.text, author.username);
@@ -1219,7 +1222,7 @@ async function handleMentions(env: Env): Promise<Response> {
 
             if (replyResult.ok) {
               // Track that we've responded to this mention to prevent duplicates
-              await env.NEWS_CACHE?.put(`responded_${mention.id}`, 'true', { expirationTtl: 7 * 24 * 60 * 60 }); // Keep for 7 days
+              await env.NEWS_CACHE?.put(`responded_${mention.id}`, 'true', { expirationTtl: 7 * 24 * 60 * 60 });
 
               console.log(`Successfully replied to ${author.username}`);
 
@@ -1260,7 +1263,7 @@ async function handleMentions(env: Env): Promise<Response> {
         }
       }
     }
-    
+
     return new Response(JSON.stringify({
       ok: true,
       message: `No new mentions found to process`,
@@ -1279,9 +1282,7 @@ async function handleMentions(env: Env): Promise<Response> {
       headers: { 'content-type': 'application/json' }
     });
   }
-}
-
-/**
+}/**
  * Compose a scheduled tweet and post to X via v2 API.
  * Runs daily at 1 PM Central Time (7 PM UTC).
  */
