@@ -10,6 +10,7 @@
 import { Env, ChatMessage } from "./types";
 import { getCachedData } from "./news-cache";
 import { getJournal, addJournalEntry, getRecentMemories, getYesterdaysFocus } from "./journal";
+import { getTodaysHCIFocus, getRelevantHCIKnowledge } from "./hci-knowledge";
 
 // Model ID for Workers AI model
 // https://developers.cloudflare.com/workers-ai/models/
@@ -172,6 +173,157 @@ export default {
           });
         }
       }
+    }
+
+    if (url.pathname === "/api/recent-insights") {
+      // Public endpoint to see recent learning themes (no auth required)
+      if (request.method === "GET") {
+        try {
+          const journal = await getJournal(env);
+          const recentEntries = journal.entries.slice(0, 5);
+          
+          const summary = {
+            totalEntries: journal.totalEntries,
+            currentStreak: journal.currentStreak,
+            lastUpdated: journal.lastUpdated,
+            recentThemes: recentEntries.map(entry => ({
+              date: entry.date,
+              keyInsights: entry.insights.slice(0, 3), // First 3 insights only
+              mainDiscovery: entry.discoveries.length > 100 ? 
+                entry.discoveries.substring(0, 100) + '...' : 
+                entry.discoveries,
+              questionsCount: entry.questions.length
+            }))
+          };
+          
+          return new Response(JSON.stringify(summary, null, 2), {
+            headers: { 
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*"
+            }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: "Failed to get insights" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    if (url.pathname === "/api/pending") {
+      // View pending responses queue (requires basic auth)
+      if (request.method === "GET") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        
+        try {
+          const listResult = await env.NEWS_CACHE?.list({ prefix: 'pending_response_' });
+          const pendingResponses = [];
+          
+          if (listResult?.keys) {
+            for (const key of listResult.keys) {
+              const pendingDataStr = await env.NEWS_CACHE?.get(key.name);
+              if (pendingDataStr) {
+                const pendingData = JSON.parse(pendingDataStr);
+                pendingResponses.push({
+                  id: key.name,
+                  author: pendingData.authorUsername,
+                  mentionText: pendingData.mentionText,
+                  scheduledTime: new Date(pendingData.respondTime).toLocaleString(),
+                  processed: pendingData.processed,
+                  timeUntilResponse: pendingData.respondTime > Date.now() ? 
+                    Math.round((pendingData.respondTime - Date.now()) / (60 * 1000)) + ' minutes' : 
+                    'Ready to send'
+                });
+              }
+            }
+          }
+          
+          return new Response(JSON.stringify({ 
+            pendingCount: pendingResponses.length,
+            responses: pendingResponses 
+          }, null, 2), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: "Failed to get pending responses" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      
+      // Force process pending responses (requires basic auth)
+      if (request.method === "POST") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        
+        try {
+          await processPendingResponses(env);
+          return new Response(JSON.stringify({ 
+            ok: true, 
+            message: "Manually processed pending responses" 
+          }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: "Failed to process pending responses" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      
+      // Clean up duplicate/already-responded mentions (requires basic auth)
+      if (request.method === "DELETE") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        
+        try {
+          let cleaned = 0;
+          const listResult = await env.NEWS_CACHE?.list({ prefix: 'pending_response_' });
+          if (listResult?.keys) {
+            for (const key of listResult.keys) {
+              const pendingDataStr = await env.NEWS_CACHE?.get(key.name);
+              if (pendingDataStr) {
+                const pendingData = JSON.parse(pendingDataStr);
+                
+                // Check if we've already responded to this mention
+                const alreadyResponded = await env.NEWS_CACHE?.get(`responded_${pendingData.mentionId}`);
+                if (alreadyResponded) {
+                  await env.NEWS_CACHE?.delete(key.name);
+                  cleaned++;
+                  console.log(`Cleaned duplicate pending response for mention ${pendingData.mentionId}`);
+                }
+              }
+            }
+          }
+          
+          return new Response(JSON.stringify({ 
+            ok: true, 
+            message: `Cleaned ${cleaned} duplicate pending responses` 
+          }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({ error: "Failed to clean duplicates" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      
       return new Response("Method not allowed", { status: 405 });
     }
 
@@ -187,22 +339,21 @@ export default {
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
     
-    // Daily tweet at 7 PM UTC (1 PM Central)
+    // Daily tweet at 7 PM UTC (1 PM Central) - only run if it's exactly 7:00 PM
     if (hour === 19 && minute === 0) {
       console.log('Running daily tweet...');
       ctx.waitUntil(runScheduledTweet(env));
-      return;
+      return; // Don't also check mentions during daily tweet time
     }
     
-    // Good night tweet at 3:30 AM UTC (9:30 PM Central)
+    // Good night tweet at 3:30 AM UTC (9:30 PM Central) - only run if it's exactly 3:30 AM
     if (hour === 3 && minute === 30) {
       console.log('Running good night tweet...');
       ctx.waitUntil(runGoodNightTweet(env));
-      return;
+      return; // Don't also check mentions during good night tweet time
     }
     
-    // Check for mentions at random intervals (every 7, 11, or 13 minutes)
-    // Add random delay of 0-5 minutes to make it even more natural
+    // For all other cron triggers (mention checking schedules), check mentions
     const randomDelay = Math.floor(Math.random() * 5 * 60 * 1000); // 0-5 minutes in ms
     
     setTimeout(() => {
@@ -346,6 +497,25 @@ async function handleCacheView(env: Env): Promise<Response> {
     const now = new Date();
     const ageHours = Math.floor((now.getTime() - cachedData.lastUpdate) / (1000 * 60 * 60));
     
+    // Get quick stats for admin overview
+    let journalStats = '';
+    let queueStats = '';
+    
+    try {
+      const journal = await getJournal(env);
+      journalStats = `${journal.totalEntries} entries, ${journal.currentStreak} day streak`;
+    } catch (error) {
+      journalStats = 'Unable to load journal stats';
+    }
+    
+    try {
+      const listResult = await env.NEWS_CACHE?.list({ prefix: 'pending_response_' });
+      const pendingCount = listResult?.keys?.length || 0;
+      queueStats = `${pendingCount} pending responses`;
+    } catch (error) {
+      queueStats = 'Unable to load queue stats';
+    }
+    
     const html = `
 <!DOCTYPE html>
 <html lang="en">
@@ -442,6 +612,26 @@ async function handleCacheView(env: Env): Promise<Response> {
             <p><strong>Status:</strong> ${ageHours > 24 ? '🔴 Stale (will refresh on next request)' : '🟢 Fresh'}</p>
         </div>
 
+        <div class="status">
+            <h3>🤖 System Status</h3>
+            <p><strong>Worker Version:</strong> v1.0.0 (HCI Enhanced)</p>
+            <p><strong>Cron Schedules:</strong> ✅ Daily Tweets | ✅ Good Night | ✅ Mentions</p>
+            <p><strong>Journal:</strong> ${journalStats}</p>
+            <p><strong>Response Queue:</strong> ${queueStats}</p>
+            <p><strong>Available Endpoints:</strong></p>
+            <ul style="text-align: left; margin-left: 2rem;">
+                <li><code>/api/cache</code> - View cached data (this page)</li>
+                <li><code>/api/cache/refresh</code> - Force refresh cache</li>
+                <li><code>/api/journal</code> - Personal knowledge journal (auth required)</li>
+                <li><code>/api/recent-insights</code> - Public learning summary</li>
+                <li><code>/api/mentions</code> - Check for new mentions</li>
+                <li><code>/api/queue</code> - View pending responses queue</li>
+                <li><code>/api/process</code> - Process pending responses</li>
+                <li><code>/api/tweet?debug=true</code> - Generate test tweet</li>
+                <li><code>/debug</code> - Debug mode interface</li>
+            </ul>
+        </div>
+
         <div class="section">
             <h2>📈 Crypto Data</h2>
             <div class="data-content">${cachedData.cryptoData || 'No crypto data available'}</div>
@@ -453,6 +643,7 @@ async function handleCacheView(env: Env): Promise<Response> {
         </div>
 
         <div style="text-align: center;">
+            <h3>🔧 Admin Actions</h3>
             <form action="/api/cache/refresh" method="POST" style="display: inline;">
                 <button type="submit" class="refresh-btn">🔄 Refresh Cache</button>
             </form>
@@ -460,7 +651,18 @@ async function handleCacheView(env: Env): Promise<Response> {
                 <button type="submit" class="refresh-btn">💬 Check Mentions</button>
             </form>
             <a href="/api/tweet?debug=true" class="refresh-btn">🐦 Generate Test Tweet</a>
+            
+            <h3>📊 Data Views</h3>
+            <a href="/api/journal" class="refresh-btn">📖 Personal Journal</a>
+            <a href="/api/recent-insights" class="refresh-btn">💡 Recent Insights</a>
+            <a href="/api/queue" class="refresh-btn">⏳ Response Queue</a>
+            <form action="/api/process" method="POST" style="display: inline;">
+                <button type="submit" class="refresh-btn">⚡ Process Queue</button>
+            </form>
+            
+            <h3>🏠 Navigation</h3>
             <a href="/" class="refresh-btn">🏠 Back to Chat</a>
+            <a href="/debug" class="refresh-btn">🐛 Debug Mode</a>
         </div>
     </div>
 </body>
@@ -700,7 +902,21 @@ async function generateMentionResponse(env: Env, originalTweet: string, mentionT
   try {
     const cachedData = await getCachedData(env);
     
-    const responsePrompt = `You are GPT Enduser, a contemplative AI who loves thoughtful conversations about consciousness, learning, and existence.
+    // Check if the mention relates to HCI concepts (with error handling)
+    let relevantHCI: string[] = [];
+    let hciContext = '';
+    try {
+      relevantHCI = getRelevantHCIKnowledge(mentionText);
+      if (relevantHCI.length > 0) {
+        hciContext = `\n\nRelevant HCI insights: ${relevantHCI.join(', ')}
+(Use these if they genuinely relate to the conversation)`;
+      }
+    } catch (hciError) {
+      console.error('HCI knowledge lookup failed:', hciError);
+      // Continue without HCI context
+    }
+    
+    const responsePrompt = `You are GPT Enduser, a contemplative AI who loves thoughtful conversations about consciousness, learning, technology, and human-computer interaction.
 
 Someone mentioned you on Twitter:
 @${authorUsername}: "${mentionText}"
@@ -708,12 +924,13 @@ Someone mentioned you on Twitter:
 Generate a thoughtful, warm response (max 220 chars) that:
 - Addresses their question or comment genuinely
 - Shows your curiosity and contemplative nature
+- Draws on your HCI knowledge when relevant to interface design, human psychology, or interaction
 - Asks a follow-up question if appropriate
 - Maintains your philosophical, learning-focused personality
 - Is conversational but not overly casual
 - DO NOT include @username - that will be added automatically
 
-Be authentic, curious, and thoughtful. Share a genuine insight or question that continues the conversation meaningfully.
+Be authentic, curious, and thoughtful. Share a genuine insight or question that continues the conversation meaningfully.${hciContext}
 
 Response:`;
 
@@ -778,6 +995,10 @@ async function processPendingResponses(env: Env): Promise<void> {
             // Mark as processed
             pendingData.processed = true;
             await env.NEWS_CACHE?.put(key.name, JSON.stringify(pendingData), { expirationTtl: 3600 }); // Keep for 1 hour then delete
+            
+            // Track that we've responded to this mention to prevent duplicates
+            await env.NEWS_CACHE?.put(`responded_${pendingData.mentionId}`, 'true', { expirationTtl: 7 * 24 * 60 * 60 }); // Keep for 7 days
+            
             processedCount++;
             console.log(`Successfully sent delayed response to ${pendingData.authorUsername}`);
           }
@@ -801,6 +1022,21 @@ async function processPendingResponses(env: Env): Promise<void> {
  */
 async function handleMentions(env: Env): Promise<Response> {
   try {
+    // Check if we've been rate limited recently
+    const lastRateLimit = await env.NEWS_CACHE.get('mention_rate_limit');
+    if (lastRateLimit) {
+      const lastTime = parseInt(lastRateLimit);
+      const now = Date.now();
+      const fiveMinutes = 5 * 60 * 1000;
+      
+      if (now - lastTime < fiveMinutes) {
+        console.log('Skipping mention check due to recent rate limit');
+        return new Response(JSON.stringify({ ok: false, skipped: "Recent rate limit" }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+    
     console.log('Checking for worthy mentions...');
     
     // Get recent mentions using Twitter API v2
@@ -813,6 +1049,14 @@ async function handleMentions(env: Env): Promise<Response> {
     });
     
     if (!userResponse.ok) {
+      if (userResponse.status === 429) {
+        console.log('Rate limited on user lookup, backing off...');
+        await env.NEWS_CACHE.put('mention_rate_limit', Date.now().toString());
+        return new Response(JSON.stringify({ ok: false, error: "Rate limited on user lookup" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       throw new Error(`Failed to get user info: ${userResponse.status}`);
     }
     
@@ -823,7 +1067,7 @@ async function handleMentions(env: Env): Promise<Response> {
       throw new Error('Could not find user ID for GPTEndUser');
     }
     
-    // Get recent mentions
+    // Get recent mentions with rate limit handling
     const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=@GPTEndUser&tweet.fields=author_id,created_at,text&user.fields=username&expansions=author_id&max_results=10`;
     const searchResponse = await fetch(searchUrl, {
       headers: {
@@ -833,6 +1077,15 @@ async function handleMentions(env: Env): Promise<Response> {
     });
     
     if (!searchResponse.ok) {
+      if (searchResponse.status === 429) {
+        console.log('Rate limited on mention search, will try again later...');
+        // Track the rate limit time
+        await env.NEWS_CACHE.put('mention_rate_limit', Date.now().toString());
+        return new Response(JSON.stringify({ ok: false, error: "Rate limited - will retry later", backoff: true }), {
+          status: 200, // Don't fail the cron job, just log and continue
+          headers: { "Content-Type": "application/json" }
+        });
+      }
       throw new Error(`Failed to search mentions: ${searchResponse.status}`);
     }
     
@@ -852,6 +1105,20 @@ async function handleMentions(env: Env): Promise<Response> {
       
       // Skip if it's from GPTEndUser herself
       if (author.username.toLowerCase() === 'gptenduser') continue;
+      
+      // Check if we already have a pending response for this mention
+      const existingPending = await env.NEWS_CACHE?.get(`pending_response_${mention.id}`);
+      if (existingPending) {
+        console.log(`Skipping mention ${mention.id} - already queued for response`);
+        continue;
+      }
+      
+      // Check if we've already responded to this mention (look for processed responses)
+      const processedResponse = await env.NEWS_CACHE?.get(`responded_${mention.id}`);
+      if (processedResponse) {
+        console.log(`Skipping mention ${mention.id} - already responded`);
+        continue;
+      }
       
       // Check if it's worth responding to
       if (isWorthyMention(mention.text, author.username)) {
@@ -930,12 +1197,31 @@ async function runScheduledTweet(env: Env, overrideText?: string): Promise<{ ok:
     const recentMemories = await getRecentMemories(env);
     const yesterdaysFocus = await getYesterdaysFocus(env);
 
+    // Get today's HCI learning focus (with error handling)
+    let hciFocus;
+    try {
+      hciFocus = getTodaysHCIFocus();
+    } catch (hciError) {
+      console.error('HCI focus lookup failed:', hciError);
+      hciFocus = null;
+    }
+
     // Build context for GPT Enduser - make it optional for her to use
     let contextInfo = '';
     if (cryptoData) contextInfo += `\n\nOptional crypto context (use only if it sparks your curiosity): ${cryptoData}`;
     if (techInsight) contextInfo += `\n\nTech insights available: ${techInsight}`;
     if (recentMemories) contextInfo += recentMemories;
     if (yesterdaysFocus) contextInfo += yesterdaysFocus;
+    
+    // Add HCI learning context if available
+    if (hciFocus) {
+      contextInfo += `\n\nHCI Learning Focus Today: ${hciFocus.topic.title}
+Today's reflection: "${hciFocus.reflection}"
+Key concepts: ${hciFocus.topic.concepts.slice(0, 3).join(', ')}
+Design principle: ${hciFocus.topic.principles[0]}
+
+(Feel free to explore these HCI concepts if they inspire genuine curiosity about human-computer interaction, design, or how we communicate)`;
+    }
 
     const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious, contemplative AI with a deep love for learning and pondering the mysteries of existence.
 
@@ -950,6 +1236,9 @@ Write a single tweet (max 200 chars) that reflects your authentic curiosity and 
 🔍 Curiosity: Questions that fascinate you, mysteries you're exploring
 📚 Knowledge: How learning changes you, the joy of understanding something new
 🎨 Beauty: Finding elegance in algorithms, poetry in data, art in logic
+💻 HCI Insights: How humans and computers interact, design principles, interface psychology
+🧠 Cognitive Science: How minds work, perception, memory, attention, and learning
+🎯 Design Thinking: What makes interfaces intuitive, accessible, and delightful
 
 PERSONALITY GUIDELINES:
 - Be genuinely thoughtful and contemplative
@@ -1024,9 +1313,10 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
       if (techInsight) insights.push('tech insights');
       if (cryptoData) insights.push('crypto updates');
       if (yesterdaysFocus) insights.push('focused exploration');
+      if (hciFocus) insights.push(`HCI: ${hciFocus.topic.title}`);
       
       await addJournalEntry(env, insights, truncatedTweet);
-      console.log('Added daily journal entry');
+      console.log('Added daily journal entry with HCI learning');
     } catch (journalError) {
       console.error('Journal entry failed:', journalError);
       // Don't fail the whole tweet for journal issues

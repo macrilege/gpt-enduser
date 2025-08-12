@@ -32,6 +32,8 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "start": "wrangler dev",
-    "test": "vitest"
+    "test": "vitest",
+    "test:run": "vitest --run",
+    "test:coverage": "vitest --coverage"
   }
 }

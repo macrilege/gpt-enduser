@@ -28,9 +28,7 @@
     "crons": [
       "0 19 * * *",    // Daily tweet at 1 PM Central Time (7 PM UTC)
       "30 3 * * *",    // Good night tweet at 9:30 PM Central (3:30 AM UTC)
-      "*/7 * * * *",   // Check mentions every 7 minutes (random-ish timing)
-      "*/11 * * * *",  // Also check every 11 minutes (creates natural variance)
-      "*/13 * * * *"   // And every 13 minutes (ensures good coverage)
+      "15,45 * * * *"  // Check mentions at 15 and 45 minutes past each hour (avoids conflicts)
     ]
   },
   "upload_source_maps": true
