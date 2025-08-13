@@ -54,8 +54,9 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle static assets (frontend)
-    if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+    // Handle static assets (frontend) - but exclude admin routes
+    if ((url.pathname === "/" || !url.pathname.startsWith("/api/")) && 
+        url.pathname !== "/admin" && url.pathname !== "/dashboard") {
       return env.ASSETS.fetch(request);
     }
 
@@ -174,6 +175,19 @@ export default {
           return authResult; // Return the auth challenge response
         }
         return handleCacheRefresh(env);
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
+    if (url.pathname === "/admin" || url.pathname === "/dashboard") {
+      // Comprehensive admin dashboard (requires basic auth)
+      if (request.method === "GET") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        return handleAdminDashboard(env);
       }
       return new Response("Method not allowed", { status: 405 });
     }
@@ -958,6 +972,311 @@ async function handleCacheRefresh(env: Env): Promise<Response> {
 </html>`, {
       status: 500,
       headers: { 'content-type': 'text/html' }
+    });
+  }
+}
+
+/**
+ * Comprehensive Admin Dashboard - Protected view of all system data
+ */
+async function handleAdminDashboard(env: Env): Promise<Response> {
+  try {
+    // Get all system data
+    const [cachedData, journal, recentMemories] = await Promise.all([
+      getCachedData(env),
+      getJournal(env),
+      getRecentMemories(env)
+    ]);
+
+    const lastUpdateDate = new Date(cachedData.lastUpdate);
+    const now = new Date();
+    const ageHours = Math.floor((now.getTime() - cachedData.lastUpdate) / (1000 * 60 * 60));
+    
+    // Get system stats
+    const journalEntries = journal.entries.length;
+    const journalStreak = journal.currentStreak;
+    const todayEntry = journal.entries.find(entry => entry.date === new Date().toISOString().split('T')[0]);
+    
+    // Format recent memories - it returns a string
+    const memoryList = recentMemories || 'No recent memories available';
+
+    return new Response(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPT Enduser - Admin Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 2rem;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 2rem;
+            background: linear-gradient(45deg, #fff, #e3f2fd);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-size: 2.5rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1.5rem;
+            border-radius: 15px;
+            border-left: 4px solid;
+        }
+        .card-system { border-left-color: #4CAF50; }
+        .card-cache { border-left-color: #2196F3; }
+        .card-journal { border-left-color: #FF9800; }
+        .card-data { border-left-color: #9C27B0; }
+        .card h3 {
+            margin-top: 0;
+            color: #e3f2fd;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-green { background-color: #4CAF50; }
+        .status-orange { background-color: #FF9800; }
+        .status-red { background-color: #f44336; }
+        .data-content {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 1rem;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin: 1rem 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 0.5rem 0;
+            padding: 0.5rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 5px;
+        }
+        .action-buttons {
+            text-align: center;
+            margin: 2rem 0;
+        }
+        .btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 25px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin: 0.5rem 0.25rem;
+            transition: all 0.3s ease;
+            font-family: inherit;
+            font-size: inherit;
+        }
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+        .btn-primary { border-color: #2196F3; }
+        .btn-success { border-color: #4CAF50; }
+        .btn-warning { border-color: #FF9800; }
+        .memory-list {
+            list-style: none;
+            padding: 0;
+        }
+        .memory-list li {
+            margin: 0.5rem 0;
+            padding: 0.5rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 GPT Enduser - Admin Dashboard</h1>
+        
+        <div class="grid">
+            <!-- System Status Card -->
+            <div class="card card-system">
+                <h3>🖥️ System Status</h3>
+                <div class="stat-row">
+                    <span>Worker Version:</span>
+                    <span>v1.0.0 (HCI Enhanced)</span>
+                </div>
+                <div class="stat-row">
+                    <span>Cache Status:</span>
+                    <span><span class="status-indicator ${ageHours < 6 ? 'status-green' : 'status-orange'}"></span>${ageHours < 6 ? 'Fresh' : 'Aging'} (${ageHours}h old)</span>
+                </div>
+                <div class="stat-row">
+                    <span>Last Update:</span>
+                    <span>${lastUpdateDate.toLocaleString()}</span>
+                </div>
+                <div class="stat-row">
+                    <span>Current Time:</span>
+                    <span>${now.toLocaleString()}</span>
+                </div>
+                <div class="stat-row">
+                    <span>Cron Jobs:</span>
+                    <span>5 active schedules</span>
+                </div>
+            </div>
+
+            <!-- Journal Status Card -->
+            <div class="card card-journal">
+                <h3>📖 Journal System</h3>
+                <div class="stat-row">
+                    <span>Total Entries:</span>
+                    <span>${journalEntries}</span>
+                </div>
+                <div class="stat-row">
+                    <span>Current Streak:</span>
+                    <span>${journalStreak} days</span>
+                </div>
+                <div class="stat-row">
+                    <span>Today's Entry:</span>
+                    <span><span class="status-indicator ${todayEntry ? 'status-green' : 'status-red'}"></span>${todayEntry ? 'Completed' : 'Pending'}</span>
+                </div>
+                ${todayEntry ? `
+                <div class="data-content">
+                    <strong>Today's Learning:</strong> ${todayEntry.discoveries}
+                    <br><br><strong>Gratitude:</strong> ${todayEntry.gratitude}
+                    <br><br><strong>Tomorrow's Focus:</strong> ${todayEntry.tomorrowFocus}
+                </div>
+                ` : ''}
+            </div>
+
+            <!-- Cache Data Card -->
+            <div class="card card-cache">
+                <h3>💾 Cache Data</h3>
+                <div class="stat-row">
+                    <span>Crypto Data:</span>
+                    <span><span class="status-indicator ${cachedData.cryptoData ? 'status-green' : 'status-red'}"></span>${cachedData.cryptoData ? 'Active' : 'Missing'}</span>
+                </div>
+                <div class="stat-row">
+                    <span>Tech Insights:</span>
+                    <span><span class="status-indicator ${cachedData.techInsights ? 'status-green' : 'status-red'}"></span>${cachedData.techInsights ? 'Active' : 'Missing'}</span>
+                </div>
+                <div class="stat-row">
+                    <span>Weather Data:</span>
+                    <span><span class="status-indicator ${cachedData.weatherData ? 'status-green' : 'status-red'}"></span>${cachedData.weatherData ? 'Active' : 'Missing'}</span>
+                </div>
+                
+                <h4>📊 Current Cache Content:</h4>
+                <div class="data-content">
+                    <strong>Crypto:</strong> ${cachedData.cryptoData || 'No data'}
+                    <br><br><strong>Tech:</strong> ${(cachedData.techInsights || 'No data').substring(0, 200)}${cachedData.techInsights && cachedData.techInsights.length > 200 ? '...' : ''}
+                    <br><br><strong>Weather:</strong> ${cachedData.weatherData || 'No data'}
+                </div>
+            </div>
+
+            <!-- Recent Memories Card -->
+            <div class="card card-data">
+                <h3>🧠 Recent Memories</h3>
+                <div class="data-content">
+                    ${memoryList}
+                </div>
+            </div>
+        </div>
+
+        <!-- Cron Schedule Section -->
+        <div class="card card-system">
+            <h3>⏰ Cron Schedule (Central Time)</h3>
+            <div class="stat-row">
+                <span>6:30 AM</span>
+                <span>🔄 Cache Refresh</span>
+            </div>
+            <div class="stat-row">
+                <span>7:00 AM</span>
+                <span>🌤️ Morning DFW Weather</span>
+            </div>
+            <div class="stat-row">
+                <span>1:00 PM</span>
+                <span>📊 Daily Tweet</span>
+            </div>
+            <div class="stat-row">
+                <span>6:00 PM</span>
+                <span>🌅 Evening DFW Weather</span>
+            </div>
+            <div class="stat-row">
+                <span>9:30 PM</span>
+                <span>🌙 Good Night Tweet</span>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="action-buttons">
+            <h3>🔧 Admin Actions</h3>
+            <form action="/api/cache/refresh" method="POST" style="display: inline;">
+                <button type="submit" class="btn btn-primary">🔄 Refresh Cache</button>
+            </form>
+            <a href="/api/tweet?debug=true" class="btn btn-success">🐦 Test Tweet</a>
+            <form action="/api/dfw-weather" method="POST" style="display: inline;">
+                <button type="submit" class="btn btn-warning">🌤️ DFW Morning Weather</button>
+            </form>
+            <form action="/api/dfw-evening-weather" method="POST" style="display: inline;">
+                <button type="submit" class="btn btn-warning">🌅 DFW Evening Weather</button>
+            </form>
+            
+            <h3>📊 Data Views</h3>
+            <a href="/api/cache" class="btn btn-primary">💾 Cache View</a>
+            <a href="/api/journal" class="btn btn-success">📖 Journal</a>
+            <a href="/api/recent-insights" class="btn btn-warning">💡 Recent Insights</a>
+            
+            <h3>🏠 Navigation</h3>
+            <a href="/" class="btn btn-primary">🏠 Home</a>
+            <a href="/debug" class="btn btn-success">🔍 Debug Mode</a>
+        </div>
+    </div>
+</body>
+</html>`, {
+      headers: { "Content-Type": "text/html" }
+    });
+  } catch (error) {
+    console.error('Admin dashboard error:', error);
+    return new Response(`
+<!DOCTYPE html>
+<html>
+<head><title>Admin Dashboard Error</title></head>
+<body>
+    <h1>❌ Dashboard Error</h1>
+    <p>Failed to load admin dashboard: ${error instanceof Error ? error.message : 'Unknown error'}</p>
+    <a href="/api/cache">Go to Cache View</a>
+</body>
+</html>`, {
+      status: 500,
+      headers: { "Content-Type": "text/html" }
     });
   }
 }
