@@ -455,6 +455,14 @@ export default {
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
     
+    // Morning cache refresh at 11:30 AM UTC (6:30 AM Central) - 30 min before morning tweet
+    if (hour === 11 && minute === 30) {
+      console.log('Running morning cache refresh...');
+      const { refreshCache } = await import('./news-cache');
+      ctx.waitUntil(refreshCache(env));
+      return;
+    }
+    
     // Morning DFW weather tweet at 12 PM UTC (7 AM Central)
     if (hour === 12 && minute === 0) {
       console.log('Running morning DFW weather tweet...');
@@ -753,7 +761,7 @@ async function handleCacheView(env: Env): Promise<Response> {
         <div class="status">
             <h3>🤖 System Status</h3>
             <p><strong>Worker Version:</strong> v1.0.0 (HCI Enhanced)</p>
-            <p><strong>Cron Schedules:</strong> ✅ DFW Weather (7 AM & 6 PM) | ✅ Daily Tweets (1 PM) | ✅ Good Night (9:30 PM) | ❌ Mentions (Disabled)</p>
+            <p><strong>Cron Schedules:</strong> ✅ Cache Refresh (6:30 AM) | ✅ DFW Weather (7 AM & 6 PM) | ✅ Daily Tweets (1 PM) | ✅ Good Night (9:30 PM) | ❌ Mentions (Disabled)</p>
             <p><strong>Journal:</strong> ${journalStats}</p>
             <p><strong>Response Queue:</strong> ${queueStats}</p>
             <p><strong>Available Endpoints:</strong></p>
