@@ -2,6 +2,7 @@
   "name": "gpt-enduser",
   "description": "A simple chat application powered by Cloudflare Workers AI",
   "version": "0.0.0",
+  "type": "module",
   "cloudflare": {
     "label": "LLM Chat App",
     "products": [
@@ -33,7 +34,16 @@
     "dev": "wrangler dev",
     "start": "wrangler dev",
     "test": "vitest",
-    "test:run": "vitest --run",
-    "test:coverage": "vitest --coverage"
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest --watch",
+    "test:ui": "vitest --ui",
+    "test:working": "vitest run tests/basic.test.ts tests/app-functionality.test.ts tests/mention-testing.test.ts tests/manual-test.test.ts tests/cron.test.ts tests/hci.test.ts",
+    "test:core": "vitest run tests/worker-core.test.ts",
+    "test:mentions": "vitest run tests/mention-system.test.ts",
+    "test:cache": "vitest run tests/news-cache.test.ts",
+    "test:cron": "vitest run tests/cron-system.test.ts",
+    "test:integration": "vitest run tests/integration.test.ts",
+    "test:all": "vitest run --reporter=verbose"
   }
 }
