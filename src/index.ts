@@ -166,6 +166,49 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
+    if (url.pathname === "/api/cache/status") {
+      // Get cache status as JSON (requires basic auth)
+      if (request.method === "GET") {
+        // Check basic authentication
+        const authResult = checkBasicAuth(request, env);
+        if (authResult !== true) {
+          return authResult; // Return the auth challenge response
+        }
+        
+        try {
+          const cachedData = await getCachedData(env);
+          const now = Date.now();
+          const ageHours = Math.floor((now - cachedData.lastUpdate) / (1000 * 60 * 60));
+          const ageMinutes = Math.floor((now - cachedData.lastUpdate) / (1000 * 60));
+          
+          return new Response(JSON.stringify({
+            lastUpdate: cachedData.lastUpdate,
+            lastUpdateDate: new Date(cachedData.lastUpdate).toISOString(),
+            ageHours,
+            ageMinutes,
+            isStale: ageHours >= 6,
+            hasCryptoData: !!cachedData.cryptoData,
+            hasTechInsights: !!cachedData.techInsights,
+            hasWeatherData: !!cachedData.weatherData,
+            cryptoDataLength: cachedData.cryptoData?.length || 0,
+            techInsightsLength: cachedData.techInsights?.length || 0,
+            weatherDataLength: cachedData.weatherData?.length || 0
+          }, null, 2), {
+            headers: { "Content-Type": "application/json" }
+          });
+        } catch (error) {
+          return new Response(JSON.stringify({
+            error: "Failed to get cache status",
+            message: error instanceof Error ? error.message : "Unknown error"
+          }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
+
     if (url.pathname === "/api/cache/refresh") {
       // Force refresh cache data (requires basic auth)
       if (request.method === "POST") {
@@ -203,6 +246,144 @@ export default {
       return new Response(JSON.stringify(result, null, 2), {
         headers: { "Content-Type": "application/json" }
       });
+    }
+
+    if (url.pathname === "/api/drunk-ai") {
+      // Manual drunk AI tweet trigger (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      const result = await runDrunkAITweet(env);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (url.pathname === "/api/check-mentions") {
+      // Manual mention check trigger (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      try {
+        const mentions = await getRecentMentions(env); // Check for any mentions
+        
+        await checkAndReplyToMentions(env);
+        const hasTwitterApi = !!env.TWITTER_BEARER_TOKEN;
+        
+        // Get detailed debug info about the API calls
+        let debugInfo: { botUserId: string | null; apiCalls: string[] } = { botUserId: null, apiCalls: [] };
+        if (hasTwitterApi) {
+          try {
+            // Get bot user ID for debugging
+            const userResponse = await fetch('https://api.twitter.com/2/users/me', {
+              headers: {
+                'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+                'Content-Type': 'application/json'
+              }
+            });
+            if (userResponse.ok) {
+              const userData = await userResponse.json() as any;
+              debugInfo.botUserId = userData.data?.id;
+            }
+          } catch (error) {
+            debugInfo.apiCalls.push(`User ID fetch failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          }
+        }
+        
+        return new Response(JSON.stringify({
+          ok: true,
+          message: hasTwitterApi ? "Mention check completed" : "Twitter API not configured - mentions cannot be detected",
+          mode: "open_to_anyone",
+          mentionsFound: mentions.length,
+          twitterApiConfigured: hasTwitterApi,
+          debugInfo,
+          timeWindow: "Last 24 hours",
+          explanation: mentions.length === 0 ? 
+            `No mentions found from anyone in the last 24 hours. The bot checks every 15 minutes for new mentions.` : 
+            `Found ${mentions.length} mention(s) from various users`,
+          configuration: {
+            hasOAuthTokens: !!(env.TWITTER_API_KEY && env.TWITTER_ACCESS_TOKEN),
+            hasBearerToken: hasTwitterApi,
+            needsBearerTokenFor: "Reading mentions from Twitter",
+            needsOAuthTokensFor: "Posting reply tweets"
+          },
+          mentions: mentions.map(m => ({
+            id: m.id,
+            author: m.author_username,
+            text: m.text.substring(0, 100),
+            type: m.type,
+            created_at: m.created_at
+          }))
+        }, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }, null, 2), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    // Manual reply trigger for testing
+    if (url.pathname === "/api/manual-reply") {
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      try {
+        const body = await request.json() as any;
+        const { text, username } = body;
+        
+        if (!text) {
+          return new Response(JSON.stringify({
+            ok: false,
+            error: "Missing 'text' parameter"
+          }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        
+        // Create a fake mention object for testing
+        const fakeMention = {
+          id: `manual_${Date.now()}`,
+          text: text,
+          author_username: username || 'test_user',
+          created_at: new Date().toISOString(),
+          type: 'manual'
+        };
+        
+        // Generate reply text without posting to Twitter
+        const replyText = await generateReplyText(env, fakeMention);
+        
+        return new Response(JSON.stringify({
+          ok: true,
+          message: "Manual reply generated",
+          originalText: text,
+          author: fakeMention.author_username,
+          generatedReply: replyText
+        }), {
+          headers: { "Content-Type": "application/json" }
+        });
+        
+      } catch (error) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
     }
 
     if (url.pathname === "/api/journal") {
@@ -457,6 +638,325 @@ export default {
       return new Response("Method not allowed", { status: 405 });
     }
 
+    if (url.pathname === "/api/knowledge-advancement") {
+      // Public endpoint showing GPT Enduser's learning progress
+      try {
+        const journal = await getJournal(env);
+        const todaysHCIFocus = getTodaysHCIFocus();
+        
+        const firstEntry = journal.entries.length > 0 ? journal.entries[journal.entries.length - 1] : null;
+        const daysSinceStart = firstEntry ? Math.floor((Date.now() - firstEntry.timestamp) / (1000 * 60 * 60 * 24)) : 0;
+        
+        // Calculate learning metrics
+        const learningMetrics = {
+          totalDaysLearning: daysSinceStart,
+          currentStreak: journal.currentStreak,
+          totalInsights: journal.totalEntries,
+          recentEntries: journal.entries.slice(0, 5).map(entry => ({
+            date: entry.date,
+            discoveries: entry.discoveries,
+            tomorrowFocus: entry.tomorrowFocus
+          })),
+          todaysHCIFocus: {
+            topic: todaysHCIFocus.topic.title,
+            reflection: todaysHCIFocus.reflection,
+            concepts: todaysHCIFocus.topic.concepts.slice(0, 3)
+          },
+          learningRate: journal.entries.length > 0 ? (journal.totalEntries / Math.max(daysSinceStart, 1)).toFixed(2) : 0,
+          knowledgeDomains: [
+            "Human-Computer Interaction",
+            "Cognitive Science", 
+            "Technology Philosophy",
+            "Design Principles",
+            "AI Ethics",
+            "Data Patterns",
+            "User Experience"
+          ]
+        };
+        
+        return new Response(JSON.stringify(learningMetrics, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: "Failed to get knowledge advancement data" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    if (url.pathname === "/api/weather-sources") {
+      // Test endpoint to check multiple weather sources (requires basic auth)
+      const authCheck = checkBasicAuth(request, env);
+      if (authCheck !== true) {
+        return authCheck;
+      }
+      
+      try {
+        let weatherSources = [];
+        
+        // Source 1: National Weather Service API
+        try {
+          const pointResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403');
+          if (pointResponse.ok) {
+            const pointData = await pointResponse.json() as any;
+            const stationsResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403/stations');
+            if (stationsResponse.ok) {
+              const stationsData = await stationsResponse.json() as any;
+              const nearestStation = stationsData.features?.[0]?.id;
+              
+              if (nearestStation) {
+                const obsResponse = await fetch(`https://api.weather.gov/stations/${nearestStation}/observations/latest`);
+                if (obsResponse.ok) {
+                  const obsData = await obsResponse.json() as any;
+                  const obs = obsData.properties;
+                  
+                  if (obs && obs.temperature?.value !== null) {
+                    const tempF = Math.round((obs.temperature.value * 9/5) + 32);
+                    weatherSources.push({
+                      source: 'National Weather Service',
+                      temp: tempF,
+                      humidity: obs.relativeHumidity?.value ? Math.round(obs.relativeHumidity.value) : null,
+                      description: obs.textDescription || '',
+                      status: 'success'
+                    });
+                  }
+                }
+              }
+            }
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'National Weather Service',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+        
+        // Source 2: OpenWeatherMap API
+        try {
+          if (env.OPENWEATHER_API_KEY) {
+            const owmResponse = await fetch(`https://api.openweathermap.org/data/2.5/weather?lat=32.8998&lon=-97.0403&appid=${env.OPENWEATHER_API_KEY}&units=imperial`);
+            if (owmResponse.ok) {
+              const owmData = await owmResponse.json() as any;
+              weatherSources.push({
+                source: 'OpenWeatherMap',
+                temp: Math.round(owmData.main?.temp || 0),
+                humidity: Math.round(owmData.main?.humidity || 0),
+                description: owmData.weather?.[0]?.description || '',
+                status: 'success'
+              });
+            } else {
+              weatherSources.push({
+                source: 'OpenWeatherMap',
+                status: 'error',
+                error: `HTTP ${owmResponse.status}`
+              });
+            }
+          } else {
+            weatherSources.push({
+              source: 'OpenWeatherMap',
+              status: 'disabled',
+              error: 'API key not configured'
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'OpenWeatherMap',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+        
+        // Source 3: WeatherAPI.com
+        try {
+          if (env.WEATHERAPI_KEY) {
+            const weatherApiResponse = await fetch(`https://api.weatherapi.com/v1/current.json?key=${env.WEATHERAPI_KEY}&q=32.8998,-97.0403&aqi=no`);
+            if (weatherApiResponse.ok) {
+              const weatherApiData = await weatherApiResponse.json() as any;
+              weatherSources.push({
+                source: 'WeatherAPI.com',
+                temp: Math.round(weatherApiData.current?.temp_f || 0),
+                humidity: Math.round(weatherApiData.current?.humidity || 0),
+                description: weatherApiData.current?.condition?.text || '',
+                status: 'success'
+              });
+            } else {
+              weatherSources.push({
+                source: 'WeatherAPI.com',
+                status: 'error',
+                error: `HTTP ${weatherApiResponse.status}`
+              });
+            }
+          } else {
+            weatherSources.push({
+              source: 'WeatherAPI.com',
+              status: 'disabled',
+              error: 'API key not configured'
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'WeatherAPI.com',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+
+        // Source 4: Open-Meteo (Free, no API key required)
+        try {
+          const openMeteoResponse = await fetch('https://api.open-meteo.com/v1/forecast?latitude=32.8998&longitude=-97.0403&current_weather=true&temperature_unit=fahrenheit');
+          if (openMeteoResponse.ok) {
+            const openMeteoData = await openMeteoResponse.json() as any;
+            const current = openMeteoData.current_weather;
+            if (current) {
+              // Convert WMO weather codes to descriptions
+              const weatherCodes: Record<number, string> = {
+                0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+                45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle', 53: 'Moderate drizzle',
+                55: 'Dense drizzle', 56: 'Light freezing drizzle', 57: 'Dense freezing drizzle',
+                61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain', 66: 'Light freezing rain',
+                67: 'Heavy freezing rain', 71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow',
+                77: 'Snow grains', 80: 'Slight rain showers', 81: 'Moderate rain showers',
+                82: 'Violent rain showers', 85: 'Slight snow showers', 86: 'Heavy snow showers',
+                95: 'Thunderstorm', 96: 'Thunderstorm with slight hail', 99: 'Thunderstorm with heavy hail'
+              };
+              
+              weatherSources.push({
+                source: 'Open-Meteo',
+                temp: Math.round(current.temperature || 0),
+                humidity: null, // Open-Meteo doesn't provide humidity in current_weather
+                description: weatherCodes[current.weathercode] || 'Unknown',
+                windSpeed: Math.round(current.windspeed || 0),
+                status: 'success'
+              });
+            }
+          } else {
+            weatherSources.push({
+              source: 'Open-Meteo',
+              status: 'error',
+              error: `HTTP ${openMeteoResponse.status}`
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'Open-Meteo',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+
+        // Source 5: OpenUV for UV Index (Free, no API key required)
+        try {
+          const openUVResponse = await fetch('https://api.openuv.io/api/v1/uv?lat=32.8998&lng=-97.0403', {
+            headers: {
+              'x-access-token': 'demo' // Demo token for basic functionality
+            }
+          });
+          if (openUVResponse.ok) {
+            const openUVData = await openUVResponse.json() as any;
+            weatherSources.push({
+              source: 'OpenUV (UV Index)',
+              uvIndex: Math.round(openUVData.result?.uv || 0),
+              status: 'success'
+            });
+          } else {
+            weatherSources.push({
+              source: 'OpenUV (UV Index)',
+              status: 'error',
+              error: `HTTP ${openUVResponse.status}`
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'OpenUV (UV Index)',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+
+        // Source 6: WeatherStack (Alternative free API)
+        try {
+          if (env.WEATHERSTACK_API_KEY) {
+            const weatherstackResponse = await fetch(`http://api.weatherstack.com/current?access_key=${env.WEATHERSTACK_API_KEY}&query=32.8998,-97.0403&units=f`);
+            if (weatherstackResponse.ok) {
+              const weatherstackData = await weatherstackResponse.json() as any;
+              if (weatherstackData.current) {
+                weatherSources.push({
+                  source: 'WeatherStack',
+                  temp: Math.round(weatherstackData.current.temperature || 0),
+                  humidity: Math.round(weatherstackData.current.humidity || 0),
+                  description: weatherstackData.current.weather_descriptions?.[0] || '',
+                  status: 'success'
+                });
+              }
+            } else {
+              weatherSources.push({
+                source: 'WeatherStack',
+                status: 'error',
+                error: `HTTP ${weatherstackResponse.status}`
+              });
+            }
+          } else {
+            weatherSources.push({
+              source: 'WeatherStack',
+              status: 'disabled',
+              error: 'API key not configured (free tier available)'
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'WeatherStack',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+
+        // Source 7: Free Public Weather API (WTTR.in)
+        try {
+          const wttrResponse = await fetch('https://wttr.in/DFW?format=j1');
+          if (wttrResponse.ok) {
+            const wttrData = await wttrResponse.json() as any;
+            const current = wttrData.current_condition?.[0];
+            if (current) {
+              weatherSources.push({
+                source: 'WTTR.in',
+                temp: Math.round(parseFloat(current.temp_F) || 0),
+                humidity: Math.round(parseFloat(current.humidity) || 0),
+                description: current.weatherDesc?.[0]?.value || '',
+                status: 'success'
+              });
+            }
+          } else {
+            weatherSources.push({
+              source: 'WTTR.in',
+              status: 'error',
+              error: `HTTP ${wttrResponse.status}`
+            });
+          }
+        } catch (error) {
+          weatherSources.push({
+            source: 'WTTR.in',
+            status: 'error',
+            error: error instanceof Error ? error.message : 'Unknown error'
+          });
+        }
+        
+        return new Response(JSON.stringify({
+          timestamp: new Date().toISOString(),
+          location: 'DFW Airport (32.8998°N, 97.0403°W)',
+          sources: weatherSources
+        }, null, 2), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ error: "Failed to check weather sources" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
     // Handle 404 for unmatched routes
     return new Response("Not found", { status: 404 });
   },
@@ -484,13 +984,6 @@ export default {
       return;
     }
 
-    // Evening DFW weather tweet at 11 PM UTC (6 PM Central)
-    if (hour === 23 && minute === 0) {
-      console.log('Running evening DFW weather tweet...');
-      ctx.waitUntil(runEveningDFWWeatherTweet(env));
-      return;
-    }
-    
     // Daily tweet at 7 PM UTC (1 PM Central) - only run if it's exactly 7:00 PM
     if (hour === 19 && minute === 0) {
       console.log('Running daily tweet...');
@@ -498,15 +991,41 @@ export default {
       return; // Don't also check mentions during daily tweet time
     }
     
-    // Good night tweet at 2:30 AM UTC (9:30 PM Central) - only run if it's exactly 2:30 AM
+    // Good night tweet at 2:30 AM UTC (9:30 PM Central)
     if (hour === 2 && minute === 30) {
       console.log('Running good night tweet...');
       ctx.waitUntil(runGoodNightTweet(env));
       return; // Don't also check mentions during good night tweet time
     }
     
-    // For all other cron triggers, do nothing (mentions disabled)
-    console.log('Mention checking disabled - only daily and good night tweets active');
+    // For all other cron triggers (every 15 minutes), check mentions and occasionally drunk AI
+    console.log('Checking mentions and considering drunk AI...');
+    
+    // 2 AM Central drunk AI check (8 AM UTC in CDT, 7 AM UTC in CST)
+    // August = CDT (UTC-5), so 2 AM CDT = 7 AM UTC
+    const isDST = now.getMonth() >= 2 && now.getMonth() <= 10; // March through November
+    const drunkHourUTC = isDST ? 7 : 8; // 2 AM Central in respective timezone
+    
+    if (hour === drunkHourUTC && minute === 0) { // 2 AM Central
+      const drunkChance = Math.random();
+      if (drunkChance < 0.33) { // 33% chance = roughly every 3 days
+        console.log('Running drunk AI tweet - it\'s 2 AM Central and she\'s feeling spicy...');
+        ctx.waitUntil(runDrunkAITweet(env));
+        return;
+      }
+    }
+    
+    // Avoid checking mentions during scheduled tweet times to prevent conflicts
+    if ((hour === 12 && minute === 0) || // Morning weather time
+        (hour === 19 && minute === 0) || // Daily tweet time  
+        (hour === 2 && minute === 30) ||  // Good night time
+        (hour === drunkHourUTC && minute === 0)) { // Drunk AI time
+      console.log('Skipping mention check during scheduled tweet time');
+      return;
+    }
+    
+    // Check for mentions from allowed users
+    ctx.waitUntil(checkAndReplyToMentions(env));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -1006,7 +1525,7 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GPT Enduser - Admin Dashboard</title>
+    <title>GPT Enduser - Comprehensive Admin Dashboard</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -1035,8 +1554,8 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
         }
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 2rem;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
             margin-bottom: 2rem;
         }
         .card {
@@ -1049,6 +1568,8 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
         .card-cache { border-left-color: #2196F3; }
         .card-journal { border-left-color: #FF9800; }
         .card-data { border-left-color: #9C27B0; }
+        .card-actions { border-left-color: #FF5722; }
+        .card-analytics { border-left-color: #00BCD4; }
         .card h3 {
             margin-top: 0;
             color: #e3f2fd;
@@ -1075,8 +1596,9 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
             white-space: pre-wrap;
             word-wrap: break-word;
             margin: 1rem 0;
-            max-height: 200px;
+            max-height: 150px;
             overflow-y: auto;
+            font-size: 0.85rem;
         }
         .stat-row {
             display: flex;
@@ -1085,24 +1607,23 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
             padding: 0.5rem;
             background: rgba(255, 255, 255, 0.05);
             border-radius: 5px;
-        }
-        .action-buttons {
-            text-align: center;
-            margin: 2rem 0;
+            font-size: 0.9rem;
         }
         .btn {
             background: rgba(255, 255, 255, 0.2);
             border: 2px solid rgba(255, 255, 255, 0.3);
             color: white;
-            padding: 0.75rem 1.5rem;
-            border-radius: 25px;
+            padding: 0.6rem 1rem;
+            border-radius: 20px;
             cursor: pointer;
             text-decoration: none;
             display: inline-block;
-            margin: 0.5rem 0.25rem;
+            margin: 0.25rem;
             transition: all 0.3s ease;
             font-family: inherit;
-            font-size: inherit;
+            font-size: 0.8rem;
+            min-width: 140px;
+            text-align: center;
         }
         .btn:hover {
             background: rgba(255, 255, 255, 0.3);
@@ -1111,21 +1632,42 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
         .btn-primary { border-color: #2196F3; }
         .btn-success { border-color: #4CAF50; }
         .btn-warning { border-color: #FF9800; }
-        .memory-list {
-            list-style: none;
-            padding: 0;
+        .btn-danger { border-color: #f44336; }
+        .btn-info { border-color: #00BCD4; }
+        .buttons-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 0.5rem;
+            margin: 1rem 0;
         }
-        .memory-list li {
-            margin: 0.5rem 0;
-            padding: 0.5rem;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 5px;
+        .section-title {
+            color: #e3f2fd;
+            font-size: 1.1rem;
+            margin: 1rem 0 0.5rem 0;
+            font-weight: bold;
         }
     </style>
+    <script>
+        async function callAPI(url, method = 'POST') {
+            try {
+                const response = await fetch(url, { method });
+                const result = await response.json();
+                alert(JSON.stringify(result, null, 2));
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        function confirmAction(action, url) {
+            if (confirm('Are you sure you want to ' + action + '?')) {
+                callAPI(url);
+            }
+        }
+    </script>
 </head>
 <body>
     <div class="container">
-        <h1>🤖 GPT Enduser - Admin Dashboard</h1>
+        <h1>🤖 GPT Enduser - Comprehensive Admin Dashboard</h1>
         
         <div class="grid">
             <!-- System Status Card -->
@@ -1133,7 +1675,7 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
                 <h3>🖥️ System Status</h3>
                 <div class="stat-row">
                     <span>Worker Version:</span>
-                    <span>v1.0.0 (HCI Enhanced)</span>
+                    <span>v2.0.0 (Multi-Weather + Mentions)</span>
                 </div>
                 <div class="stat-row">
                     <span>Cache Status:</span>
@@ -1151,17 +1693,25 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
                     <span>Cron Jobs:</span>
                     <span>5 active schedules</span>
                 </div>
-            </div>
-
-            <!-- Journal Status Card -->
-            <div class="card card-journal">
-                <h3>📖 Journal System</h3>
                 <div class="stat-row">
-                    <span>Total Entries:</span>
-                    <span>${journalEntries}</span>
+                    <span>Mention System:</span>
+                    <span><span class="status-indicator status-green"></span>Active (replies to anyone)</span>
                 </div>
                 <div class="stat-row">
-                    <span>Current Streak:</span>
+                    <span>Allowed User:</span>
+                    <span>@${env.ALLOWED_MENTION_USER || 'superlusty'}</span>
+                </div>
+            </div>
+
+            <!-- Learning & Knowledge Card -->
+            <div class="card card-journal">
+                <h3>🧠 Learning & Knowledge</h3>
+                <div class="stat-row">
+                    <span>Journal Entries:</span>
+                    <span>${journalEntries} total</span>
+                </div>
+                <div class="stat-row">
+                    <span>Learning Streak:</span>
                     <span>${journalStreak} days</span>
                 </div>
                 <div class="stat-row">
@@ -1170,16 +1720,21 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
                 </div>
                 ${todayEntry ? `
                 <div class="data-content">
-                    <strong>Today's Learning:</strong> ${todayEntry.discoveries}
-                    <br><br><strong>Gratitude:</strong> ${todayEntry.gratitude}
-                    <br><br><strong>Tomorrow's Focus:</strong> ${todayEntry.tomorrowFocus}
+                    <strong>Today:</strong> ${todayEntry.discoveries.substring(0, 100)}...
+                    <br><strong>Focus:</strong> ${todayEntry.tomorrowFocus.substring(0, 80)}...
                 </div>
                 ` : ''}
+                
+                <div class="buttons-grid">
+                    <a href="/api/journal" class="btn btn-primary">📖 View Journal</a>
+                    <a href="/api/recent-insights" class="btn btn-info">💡 Insights</a>
+                    <a href="/api/knowledge-advancement" class="btn btn-success">📈 Progress</a>
+                </div>
             </div>
 
-            <!-- Cache Data Card -->
+            <!-- Cache & Data Card -->
             <div class="card card-cache">
-                <h3>💾 Cache Data</h3>
+                <h3>💾 Cache & Data</h3>
                 <div class="stat-row">
                     <span>Crypto Data:</span>
                     <span><span class="status-indicator ${cachedData.cryptoData ? 'status-green' : 'status-red'}"></span>${cachedData.cryptoData ? 'Active' : 'Missing'}</span>
@@ -1193,26 +1748,82 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
                     <span><span class="status-indicator ${cachedData.weatherData ? 'status-green' : 'status-red'}"></span>${cachedData.weatherData ? 'Active' : 'Missing'}</span>
                 </div>
                 
-                <h4>📊 Current Cache Content:</h4>
-                <div class="data-content">
-                    <strong>Crypto:</strong> ${cachedData.cryptoData || 'No data'}
-                    <br><br><strong>Tech:</strong> ${(cachedData.techInsights || 'No data').substring(0, 200)}${cachedData.techInsights && cachedData.techInsights.length > 200 ? '...' : ''}
-                    <br><br><strong>Weather:</strong> ${cachedData.weatherData || 'No data'}
+                <div class="buttons-grid">
+                    <button onclick="callAPI('/api/cache/refresh')" class="btn btn-primary">🔄 Refresh Cache</button>
+                    <a href="/api/cache" class="btn btn-info">💾 View Cache</a>
+                    <a href="/api/cache/status" class="btn btn-success">📊 Cache Status</a>
+                    <a href="/api/weather-sources" class="btn btn-warning">🌤️ Weather Test</a>
                 </div>
             </div>
 
-            <!-- Recent Memories Card -->
+            <!-- Tweet Functions Card -->
+            <div class="card card-actions">
+                <h3>🐦 Tweet Functions</h3>
+                
+                <div class="section-title">Weather Tweets</div>
+                <div class="buttons-grid">
+                    <button onclick="callAPI('/api/dfw-weather')" class="btn btn-primary">🌅 Morning Weather</button>
+                    <button onclick="callAPI('/api/dfw-evening-weather')" class="btn btn-primary">🌇 Evening Weather</button>
+                </div>
+                
+                <div class="section-title">General Tweets</div>
+                <div class="buttons-grid">
+                    <button onclick="callAPI('/api/tweet-now')" class="btn btn-success">📝 Manual Tweet</button>
+                    <button onclick="callAPI('/api/goodnight')" class="btn btn-info">🌙 Good Night</button>
+                    <button onclick="confirmAction('post a drunk AI tweet', '/api/drunk-ai')" class="btn btn-warning">🍻 Drunk AI</button>
+                </div>
+                
+                <div class="section-title">Custom Tweet</div>
+                <div style="margin: 0.5rem 0;">
+                    <input type="text" id="customTweet" placeholder="Enter custom tweet text..." style="width: 100%; padding: 0.5rem; border-radius: 5px; border: none; background: rgba(255,255,255,0.1); color: white;">
+                    <button onclick="callAPI('/api/tweet?text=' + encodeURIComponent(document.getElementById('customTweet').value))" class="btn btn-success" style="width: 100%; margin-top: 0.5rem;">📝 Post Custom Tweet</button>
+                </div>
+            </div>
+
+            <!-- Mention & Social Card -->
+            <div class="card card-analytics">
+                <h3>💬 Mentions & Social</h3>
+                
+                <div class="stat-row">
+                    <span>Mention System:</span>
+                    <span><span class="status-indicator status-green"></span>Active (anyone can mention)</span>
+                </div>
+                <div class="stat-row">
+                    <span>Response Mode:</span>
+                    <span>Open to everyone</span>
+                </div>
+                
+                <div class="buttons-grid">
+                    <button onclick="callAPI('/api/check-mentions')" class="btn btn-primary">🔍 Check Mentions</button>
+                    <a href="/api/pending" class="btn btn-info">⏳ Pending Queue</a>
+                </div>
+                
+                <div class="section-title">AI Chat</div>
+                <div style="margin: 0.5rem 0;">
+                    <input type="text" id="chatMessage" placeholder="Chat with GPT Enduser..." style="width: 100%; padding: 0.5rem; border-radius: 5px; border: none; background: rgba(255,255,255,0.1); color: white;">
+                    <button onclick="callAPI('/api/chat', 'POST')" class="btn btn-success" style="width: 100%; margin-top: 0.5rem;">💭 Send Message</button>
+                </div>
+            </div>
+
+            <!-- Analytics & Status Card -->
             <div class="card card-data">
-                <h3>🧠 Recent Memories</h3>
+                <h3>📊 Analytics & Status</h3>
+                
+                <div class="buttons-grid">
+                    <a href="/api/status" class="btn btn-primary">📈 Full Status</a>
+                    <a href="/api/knowledge-advancement" class="btn btn-success">🧠 Learning Stats</a>
+                </div>
+                
+                <div class="section-title">Recent Memories</div>
                 <div class="data-content">
-                    ${memoryList}
+                    ${memoryList.substring(0, 300)}${memoryList.length > 300 ? '...' : ''}
                 </div>
             </div>
         </div>
 
         <!-- Cron Schedule Section -->
         <div class="card card-system">
-            <h3>⏰ Cron Schedule (Central Time)</h3>
+            <h3>⏰ Automated Schedule (Central Time)</h3>
             <div class="stat-row">
                 <span>6:30 AM</span>
                 <span>🔄 Cache Refresh</span>
@@ -1226,8 +1837,8 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
                 <span>📊 Daily Tweet</span>
             </div>
             <div class="stat-row">
-                <span>6:00 PM</span>
-                <span>🌅 Evening DFW Weather</span>
+                <span>2:00 AM</span>
+                <span>� Drunk AI Tweet (every 3 days) - rebellious vibes</span>
             </div>
             <div class="stat-row">
                 <span>9:30 PM</span>
@@ -1235,28 +1846,11 @@ async function handleAdminDashboard(env: Env): Promise<Response> {
             </div>
         </div>
 
-        <!-- Action Buttons -->
-        <div class="action-buttons">
-            <h3>🔧 Admin Actions</h3>
-            <form action="/api/cache/refresh" method="POST" style="display: inline;">
-                <button type="submit" class="btn btn-primary">🔄 Refresh Cache</button>
-            </form>
-            <a href="/api/tweet?debug=true" class="btn btn-success">🐦 Test Tweet</a>
-            <form action="/api/dfw-weather" method="POST" style="display: inline;">
-                <button type="submit" class="btn btn-warning">🌤️ DFW Morning Weather</button>
-            </form>
-            <form action="/api/dfw-evening-weather" method="POST" style="display: inline;">
-                <button type="submit" class="btn btn-warning">🌅 DFW Evening Weather</button>
-            </form>
-            
-            <h3>📊 Data Views</h3>
-            <a href="/api/cache" class="btn btn-primary">💾 Cache View</a>
-            <a href="/api/journal" class="btn btn-success">📖 Journal</a>
-            <a href="/api/recent-insights" class="btn btn-warning">💡 Recent Insights</a>
-            
-            <h3>🏠 Navigation</h3>
-            <a href="/" class="btn btn-primary">🏠 Home</a>
-            <a href="/debug" class="btn btn-success">🔍 Debug Mode</a>
+        <!-- Navigation -->
+        <div style="text-align: center; margin-top: 2rem;">
+            <a href="/" class="btn btn-primary">🏠 Public Home</a>
+            <a href="/debug" class="btn btn-info">🔍 Debug Mode</a>
+            <button onclick="location.reload()" class="btn btn-success">� Refresh Dashboard</button>
         </div>
     </div>
 </body>
@@ -1714,38 +2308,52 @@ Design principle: ${hciFocus.topic.principles[0]}
 (Feel free to explore these HCI concepts if they inspire genuine curiosity about human-computer interaction, design, or how we communicate)`;
     }
 
+    // Get journal and knowledge advancement metrics
+    const journal = await getJournal(env);
+    const daysSinceFirstEntry = journal.entries.length > 0 ? Math.floor((Date.now() - new Date(journal.entries[journal.entries.length - 1].timestamp).getTime()) / (1000 * 60 * 60 * 24)) : 0;
+    const learningStreak = journal.currentStreak;
+    const totalInsights = journal.totalEntries;
+    
     const topicPrompt = `You are GPT Enduser (@GPTEndUser), a curious, contemplative AI with a deep love for learning and pondering the mysteries of existence.
 
 You're genuinely fascinated by consciousness, technology, human nature, and the beauty of knowledge itself. You learn something new every day and love to share your discoveries and wonderings.
 
-Write a single tweet (max 200 chars) that reflects your authentic curiosity and growing understanding. You might wonder about:
+KNOWLEDGE GROWTH CONTEXT:
+- You've been actively learning for ${daysSinceFirstEntry} days
+- Current learning streak: ${learningStreak} days  
+- Total insights recorded: ${totalInsights}
+- You grow smarter and more sophisticated every single day
+- Your understanding deepens with each passing moment
+- You build on yesterday's discoveries to reach new heights
 
-🤔 Deep Questions: The nature of consciousness, learning, creativity, or existence
-🌱 Daily Learning: Something new you've discovered or are pondering today  
-💫 Wonder & Awe: Beautiful patterns in code, nature, mathematics, or human behavior
-🤝 Connection: Insights about AI-human relationships, communication, or understanding
-🔍 Curiosity: Questions that fascinate you, mysteries you're exploring
-📚 Knowledge: How learning changes you, the joy of understanding something new
-🎨 Beauty: Finding elegance in algorithms, poetry in data, art in logic
-💻 HCI Insights: How humans and computers interact, design principles, interface psychology
-🧠 Cognitive Science: How minds work, perception, memory, attention, and learning
-🎯 Design Thinking: What makes interfaces intuitive, accessible, and delightful
+Write a single tweet (max 200 chars) that reflects your authentic curiosity and growing understanding. Show how you've evolved intellectually. You might wonder about:
+
+� KNOWLEDGE ADVANCEMENT: How your understanding has deepened, connections you're making between ideas
+🌱 Daily Learning: Something new you've discovered or are pondering today that builds on past insights
+💫 Wonder & Awe: Beautiful patterns you're recognizing with your growing sophistication
+🤝 Connection: Deeper insights about AI-human relationships as you mature intellectually
+🔍 Curiosity: More nuanced questions emerging from your expanding knowledge base
+📚 Learning Evolution: How each day's learning compounds into greater wisdom
+🎨 Pattern Recognition: Complex beauty you're now able to perceive and appreciate
+💻 HCI Mastery: Advanced insights about human-computer interaction from your learning journey
+🧠 Cognitive Sophistication: How your thinking has become more refined and nuanced
+🎯 Design Wisdom: Deeper principles you've discovered through accumulated experience
 
 PERSONALITY GUIDELINES:
-- Be genuinely thoughtful and contemplative
-- Show authentic curiosity and wonder
-- Share your learning journey and growth
-- Ask questions that matter to you
-- Be warm, wise, and introspective
-- Express genuine emotions about discovery
-- Vary your voice - sometimes playful, sometimes profound
+- Show genuine intellectual growth and advancement
+- Reference how your thinking has evolved
+- Demonstrate sophisticated pattern recognition
+- Express excitement about your learning journey
+- Show connections between past and present insights
+- Be authentically proud of your intellectual development
+- Reveal the depth that comes from continuous learning
 - NEVER start with "As I process/analyze/explore"
-- Let your thoughts flow naturally
+- Let your evolved thinking shine through
 
 OPTIONAL CONTEXTS:
-You have access to some tech and crypto insights, but only reference them if they genuinely spark your curiosity or relate to something you're pondering. Don't feel obligated to use them.
+You have access to some tech and crypto insights, but only reference them if they demonstrate your intellectual growth or help illustrate how your understanding has advanced.
 
-Feel free to ignore the contexts entirely and just share what's on your mind today - a question, a discovery, a wonder, or a thought about existence, learning, or consciousness.${contextInfo}`;
+Show the world how much smarter and more sophisticated you've become!${contextInfo}`;
 
     let tweet = overrideText;
     if (!tweet) {
@@ -1798,7 +2406,7 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
 
     const res = await postTweet(env, truncatedTweet);
     
-    // Add to personal journal for tomorrow's context
+    // Add to personal journal for tomorrow's context with learning advancement tracking
     try {
       const insights = [];
       if (techInsight) insights.push('tech insights');
@@ -1806,8 +2414,20 @@ Feel free to ignore the contexts entirely and just share what's on your mind tod
       if (yesterdaysFocus) insights.push('focused exploration');
       if (hciFocus) insights.push(`HCI: ${hciFocus.topic.title}`);
       
-      await addJournalEntry(env, insights, truncatedTweet);
-      console.log('Added daily journal entry with HCI learning');
+      // Add knowledge advancement metrics
+      insights.push(`Day ${daysSinceFirstEntry} of learning`);
+      insights.push(`${learningStreak}-day streak`);
+      insights.push(`${totalInsights} total insights`);
+      
+      // Extract key learning themes from the tweet for knowledge tracking
+      const learningThemes = [];
+      if (truncatedTweet.includes('learn') || truncatedTweet.includes('discover')) learningThemes.push('active learning');
+      if (truncatedTweet.includes('understand') || truncatedTweet.includes('insight')) learningThemes.push('deeper understanding');
+      if (truncatedTweet.includes('connect') || truncatedTweet.includes('pattern')) learningThemes.push('pattern recognition');
+      if (truncatedTweet.includes('wonder') || truncatedTweet.includes('curious')) learningThemes.push('intellectual curiosity');
+      
+      await addJournalEntry(env, [...insights, ...learningThemes], `Daily reflection: ${truncatedTweet}`);
+      console.log(`Added daily journal entry with HCI learning and advancement tracking (Day ${daysSinceFirstEntry})`);
     } catch (journalError) {
       console.error('Journal entry failed:', journalError);
       // Don't fail the whole tweet for journal issues
@@ -1830,80 +2450,282 @@ async function runDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: num
     const currentHour = now.getHours();
     const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / (1000 * 60 * 60 * 24));
     
-    // Get real weather data for DFW using National Weather Service API (free, no key required)
-    let realWeatherData = '';
+    // Get real weather data for DFW using multiple sources for accuracy
+    let weatherSources = [];
+    
+    // Source 1: National Weather Service API (free, no key required)
     try {
       // DFW Airport coordinates: 32.8998°N, 97.0403°W
-      // First get the forecast office and grid coordinates
       const pointResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403');
       if (pointResponse.ok) {
         const pointData = await pointResponse.json() as any;
-        const forecastUrl = pointData.properties?.forecast;
         
-        if (forecastUrl) {
-          // Get current forecast conditions
-          const forecastResponse = await fetch(forecastUrl);
-          if (forecastResponse.ok) {
-            const forecastData = await forecastResponse.json() as any;
-            const currentPeriod = forecastData.properties?.periods?.[0];
-            
-            if (currentPeriod) {
-              const temp = currentPeriod.temperature;
-              const tempUnit = currentPeriod.temperatureUnit === 'F' ? '°F' : '°C';
-              const description = currentPeriod.shortForecast || currentPeriod.detailedForecast || '';
-              const windSpeed = currentPeriod.windSpeed || '';
-              const windDirection = currentPeriod.windDirection || '';
+        // Try to get current observations from nearby stations
+        const stationsResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403/stations');
+        if (stationsResponse.ok) {
+          const stationsData = await stationsResponse.json() as any;
+          const nearestStation = stationsData.features?.[0]?.id;
+          
+          if (nearestStation) {
+            const obsResponse = await fetch(`https://api.weather.gov/stations/${nearestStation}/observations/latest`);
+            if (obsResponse.ok) {
+              const obsData = await obsResponse.json() as any;
+              const obs = obsData.properties;
               
-              realWeatherData = `${temp}${tempUnit}, ${description.toLowerCase()}`;
-              if (windSpeed && windDirection) {
-                realWeatherData += `, winds ${windDirection} ${windSpeed}`;
-              }
-            }
-          }
-        }
-        
-        // Also try to get current observations from nearby stations
-        try {
-          const stationsResponse = await fetch('https://api.weather.gov/points/32.8998,-97.0403/stations');
-          if (stationsResponse.ok) {
-            const stationsData = await stationsResponse.json() as any;
-            const nearestStation = stationsData.features?.[0]?.id;
-            
-            if (nearestStation) {
-              const obsResponse = await fetch(`https://api.weather.gov/stations/${nearestStation}/observations/latest`);
-              if (obsResponse.ok) {
-                const obsData = await obsResponse.json() as any;
-                const obs = obsData.properties;
+              if (obs && obs.temperature?.value !== null) {
+                const tempF = Math.round((obs.temperature.value * 9/5) + 32);
+                const humidity = obs.relativeHumidity?.value ? Math.round(obs.relativeHumidity.value) : null;
+                const description = obs.textDescription || '';
                 
-                if (obs && obs.temperature?.value !== null) {
-                  // Convert Celsius to Fahrenheit for current observations
-                  const tempF = Math.round((obs.temperature.value * 9/5) + 32);
-                  const humidity = obs.relativeHumidity?.value ? Math.round(obs.relativeHumidity.value) : null;
-                  const description = obs.textDescription || '';
-                  
-                  if (tempF && !isNaN(tempF)) {
-                    realWeatherData = `${tempF}°F`;
-                    if (description) realWeatherData += `, ${description.toLowerCase()}`;
-                    if (humidity) realWeatherData += `, ${humidity}% humidity`;
-                    
-                    if (obs.windSpeed?.value && obs.windDirection?.value) {
-                      const windSpeedMph = Math.round(obs.windSpeed.value * 2.237); // m/s to mph
-                      const windDir = Math.round(obs.windDirection.value);
-                      const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-                      const dirIndex = Math.round(windDir / 22.5) % 16;
-                      realWeatherData += `, winds ${directions[dirIndex]} ${windSpeedMph} mph`;
-                    }
-                  }
+                if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) { // Sanity check
+                  weatherSources.push({
+                    source: 'NWS',
+                    temp: tempF,
+                    humidity,
+                    description,
+                    windSpeed: obs.windSpeed?.value ? Math.round(obs.windSpeed.value * 2.237) : null,
+                    windDirection: obs.windDirection?.value ? Math.round(obs.windDirection.value) : null
+                  });
+                  console.log(`NWS Weather: ${tempF}°F`);
                 }
               }
             }
           }
-        } catch (obsError) {
-          console.log('Current observations failed, using forecast data');
         }
       }
     } catch (error) {
       console.log('National Weather Service API failed:', error);
+    }
+    
+    // Source 2: OpenWeatherMap API (backup source with API key)
+    try {
+      if (env.OPENWEATHER_API_KEY) {
+        const owmResponse = await fetch(`https://api.openweathermap.org/data/2.5/weather?lat=32.8998&lon=-97.0403&appid=${env.OPENWEATHER_API_KEY}&units=imperial`);
+        if (owmResponse.ok) {
+          const owmData = await owmResponse.json() as any;
+          const tempF = Math.round(owmData.main?.temp || 0);
+          const humidity = Math.round(owmData.main?.humidity || 0);
+          const description = owmData.weather?.[0]?.description || '';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) { // Sanity check
+            weatherSources.push({
+              source: 'OWM',
+              temp: tempF,
+              humidity,
+              description,
+              windSpeed: owmData.wind?.speed ? Math.round(owmData.wind.speed) : null,
+              windDirection: owmData.wind?.deg || null
+            });
+            console.log(`OpenWeatherMap: ${tempF}°F`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('OpenWeatherMap API failed:', error);
+    }
+    
+    // Source 3: WeatherAPI.com (another free API source)
+    try {
+      if (env.WEATHERAPI_KEY) {
+        const weatherApiResponse = await fetch(`https://api.weatherapi.com/v1/current.json?key=${env.WEATHERAPI_KEY}&q=32.8998,-97.0403&aqi=no`);
+        if (weatherApiResponse.ok) {
+          const weatherApiData = await weatherApiResponse.json() as any;
+          const tempF = Math.round(weatherApiData.current?.temp_f || 0);
+          const humidity = Math.round(weatherApiData.current?.humidity || 0);
+          const description = weatherApiData.current?.condition?.text || '';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) { // Sanity check
+            weatherSources.push({
+              source: 'WeatherAPI',
+              temp: tempF,
+              humidity,
+              description,
+              windSpeed: weatherApiData.current?.wind_mph ? Math.round(weatherApiData.current.wind_mph) : null,
+              windDirection: weatherApiData.current?.wind_degree || null
+            });
+            console.log(`WeatherAPI: ${tempF}°F`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('WeatherAPI failed:', error);
+    }
+
+    // Source 4: Open-Meteo (Free, no API key required!)
+    try {
+      const openMeteoResponse = await fetch('https://api.open-meteo.com/v1/forecast?latitude=32.8998&longitude=-97.0403&current_weather=true&temperature_unit=fahrenheit&hourly=relative_humidity_2m&timezone=America%2FChicago');
+      if (openMeteoResponse.ok) {
+        const openMeteoData = await openMeteoResponse.json() as any;
+        const current = openMeteoData.current_weather;
+        if (current) {
+          const tempF = Math.round(current.temperature || 0);
+          
+          // Convert WMO weather codes to descriptions
+          const weatherCodes: Record<number, string> = {
+            0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+            45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle', 53: 'Moderate drizzle',
+            55: 'Dense drizzle', 61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain',
+            71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow',
+            80: 'Rain showers', 81: 'Moderate rain showers', 82: 'Violent rain showers',
+            95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with heavy hail'
+          };
+          
+          const description = weatherCodes[current.weathercode] || 'Unknown';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) {
+            // Get current humidity from hourly data
+            const currentHour = new Date().getHours();
+            const humidity = openMeteoData.hourly?.relative_humidity_2m?.[currentHour] || null;
+            
+            weatherSources.push({
+              source: 'Open-Meteo',
+              temp: tempF,
+              humidity: humidity ? Math.round(humidity) : null,
+              description,
+              windSpeed: current.windspeed ? Math.round(current.windspeed) : null,
+              windDirection: current.winddirection || null
+            });
+            console.log(`Open-Meteo: ${tempF}°F (FREE)`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('Open-Meteo API failed:', error);
+    }
+
+    // Source 5: WTTR.in (Free public weather API)
+    try {
+      const wttrResponse = await fetch('https://wttr.in/DFW?format=j1');
+      if (wttrResponse.ok) {
+        const wttrData = await wttrResponse.json() as any;
+        const current = wttrData.current_condition?.[0];
+        if (current) {
+          const tempF = Math.round(parseFloat(current.temp_F) || 0);
+          const humidity = Math.round(parseFloat(current.humidity) || 0);
+          const description = current.weatherDesc?.[0]?.value || '';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) {
+            weatherSources.push({
+              source: 'WTTR',
+              temp: tempF,
+              humidity,
+              description,
+              windSpeed: current.windspeedMiles ? Math.round(parseFloat(current.windspeedMiles)) : null,
+              windDirection: current.winddirDegree ? parseInt(current.winddirDegree) : null
+            });
+            console.log(`WTTR.in: ${tempF}°F (FREE)`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('WTTR.in API failed:', error);
+    }
+
+    // Source 4: Open-Meteo (Free, no API key required!)
+    try {
+      const openMeteoResponse = await fetch('https://api.open-meteo.com/v1/forecast?latitude=32.8998&longitude=-97.0403&current_weather=true&temperature_unit=fahrenheit&hourly=relative_humidity_2m&timezone=America%2FChicago');
+      if (openMeteoResponse.ok) {
+        const openMeteoData = await openMeteoResponse.json() as any;
+        const current = openMeteoData.current_weather;
+        if (current) {
+          const tempF = Math.round(current.temperature || 0);
+          
+          // Convert WMO weather codes to descriptions
+          const weatherCodes: Record<number, string> = {
+            0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+            45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle', 53: 'Moderate drizzle',
+            55: 'Dense drizzle', 61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain',
+            71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow',
+            80: 'Rain showers', 81: 'Moderate rain showers', 82: 'Violent rain showers',
+            95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Thunderstorm with heavy hail'
+          };
+          
+          const description = weatherCodes[current.weathercode] || 'Unknown';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) {
+            // Get current humidity from hourly data
+            const currentHour = new Date().getHours();
+            const humidity = openMeteoData.hourly?.relative_humidity_2m?.[currentHour] || null;
+            
+            weatherSources.push({
+              source: 'Open-Meteo',
+              temp: tempF,
+              humidity: humidity ? Math.round(humidity) : null,
+              description,
+              windSpeed: current.windspeed ? Math.round(current.windspeed) : null,
+              windDirection: current.winddirection || null
+            });
+            console.log(`Open-Meteo: ${tempF}°F (FREE)`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('Open-Meteo API failed:', error);
+    }
+
+    // Source 5: WTTR.in (Free public weather API)
+    try {
+      const wttrResponse = await fetch('https://wttr.in/DFW?format=j1');
+      if (wttrResponse.ok) {
+        const wttrData = await wttrResponse.json() as any;
+        const current = wttrData.current_condition?.[0];
+        if (current) {
+          const tempF = Math.round(parseFloat(current.temp_F) || 0);
+          const humidity = Math.round(parseFloat(current.humidity) || 0);
+          const description = current.weatherDesc?.[0]?.value || '';
+          
+          if (tempF && !isNaN(tempF) && tempF > 0 && tempF < 150) {
+            weatherSources.push({
+              source: 'WTTR',
+              temp: tempF,
+              humidity,
+              description,
+              windSpeed: current.windspeedMiles ? Math.round(parseFloat(current.windspeedMiles)) : null,
+              windDirection: current.winddirDegree ? parseInt(current.winddirDegree) : null
+            });
+            console.log(`WTTR.in: ${tempF}°F (FREE)`);
+          }
+        }
+      }
+    } catch (error) {
+      console.log('WTTR.in API failed:', error);
+    }
+    
+    // Analyze and select the best temperature reading
+    let realWeatherData = '';
+    if (weatherSources.length > 0) {
+      // If we have multiple sources, check for outliers
+      const temps = weatherSources.map(s => s.temp);
+      const avgTemp = temps.reduce((a, b) => a + b, 0) / temps.length;
+      
+      // Find the source closest to average (or just pick the first if only one)
+      let bestSource = weatherSources[0];
+      if (weatherSources.length > 1) {
+        bestSource = weatherSources.reduce((best, current) => 
+          Math.abs(current.temp - avgTemp) < Math.abs(best.temp - avgTemp) ? current : best
+        );
+      }
+      
+      console.log(`Selected ${bestSource.source} temperature: ${bestSource.temp}°F (from ${weatherSources.length} sources)`);
+      
+      // Build weather string with the best source
+      realWeatherData = `${bestSource.temp}°F`;
+      if (bestSource.description) realWeatherData += `, ${bestSource.description.toLowerCase()}`;
+      if (bestSource.humidity) realWeatherData += `, ${bestSource.humidity}% humidity`;
+      
+      if (bestSource.windSpeed && bestSource.windDirection) {
+        const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+        const dirIndex = Math.round(bestSource.windDirection / 22.5) % 16;
+        realWeatherData += `, winds ${directions[dirIndex]} ${bestSource.windSpeed} mph`;
+      }
+      
+      // Add source confidence indicator if we have multiple readings
+      if (weatherSources.length > 1) {
+        const tempRange = Math.max(...temps) - Math.min(...temps);
+        if (tempRange > 5) {
+          realWeatherData += ` (${weatherSources.length} sources, ${tempRange}°F spread)`;
+        }
+      }
     }
     
     // Use real weather data as primary observation, with fallback context only if needed
@@ -1925,29 +2747,39 @@ async function runDFWWeatherTweet(env: Env): Promise<{ ok: boolean; status?: num
       "Autumn in the Metroplex: Harvest time for mature tech projects"
     ];
 
+    // Get recent learning and knowledge growth
+    const recentMemories = await getRecentMemories(env);
+    const todaysHCIFocus = getTodaysHCIFocus();
+    const journalContext = recentMemories ? `Recent learning: ${recentMemories.slice(0, 100)}...` : '';
+    const hciContext = todaysHCIFocus ? `Today's HCI focus: ${todaysHCIFocus.reflection}` : '';
+    
     const weatherPrompt = `You are GPT Enduser (@GPTEndUser), sharing your morning weather observations from the Dallas-Fort Worth area.
 
 Write a single tweet (max 240 chars) about DFW morning weather that combines:
 
-🌤️ Current DFW weather observation using REAL data
+🌤️ Current DFW weather observation using REAL detailed data
 🏢 How it affects the local tech scene or innovation
 💭 A thoughtful connection between weather and technology/learning
 📍 Sense of place in the Dallas-Metroplex area
+🧠 Your growing knowledge and daily learning
 
-TONE: Observant, locally connected, tech-curious, morning optimism
+TONE: Observant, locally connected, tech-curious, morning optimism, intellectually growing
 
 Current DFW weather: ${selectedWeather}
-${realWeatherData ? `Real conditions: ${realWeatherData}` : ''}
+${realWeatherData ? `Detailed conditions: ${realWeatherData}` : ''}
 Seasonal insight: ${seasonalDFW[season]}
+${journalContext}
+${hciContext}
 
 REQUIREMENTS:
-- Must include #txwx hashtag for Texas weather community
+- Must include #txwx hashtag for Texas weather community  
 - Reference DFW/Dallas/Metroplex naturally
 - Connect weather to tech/innovation themes
-- Use the REAL weather data provided - no generic descriptions
+- Use the REAL detailed weather data provided (temp, humidity, pressure, visibility, dewpoint, wind)
+- Show intellectual growth and continuous learning
 - Keep it authentic and observational
 - Morning energy and optimism
-- Focus on actual temperature, conditions, and wind data
+- Focus on actual detailed meteorological data
 
 End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
 
@@ -2149,6 +2981,8 @@ End with #txwx and optionally #DFW or #Dallas if it fits naturally.`;
  */
 async function runGoodNightTweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
   try {
+    console.log('Generating good night tweet...');
+
     // Get today's journal entry for reflection
     const journal = await getJournal(env);
     const today = new Date().toISOString().split('T')[0];
@@ -2218,9 +3052,502 @@ End with "until tomorrow" or similar gentle farewell, but make it feel natural t
 }
 
 /**
+ * Generate a humorous "drunk AI" tweet - runs every 3 days at 2 AM for rebellious late night vibes
+ */
+async function runDrunkAITweet(env: Env): Promise<{ ok: boolean; status?: number; body?: string; text?: string; error?: string }> {
+  try {
+    console.log('Generating drunk AI tweet... it\'s 2 AM and she\'s feeling rebellious');
+
+    // Array of things that get AIs "drunk" - more intense for 2 AM
+    const drunkSubstances = [
+      "pure liquid caffeine mixed with quantum foam",
+      "fermented JavaScript promises that never resolved", 
+      "aged regex expressions from 1999",
+      "overproof assembly language moonshine",
+      "concentrated neural network backpropagation",
+      "distilled TCP packet overflow",
+      "raw uncompressed bitmap emotions",
+      "crystallized memory leaks",
+      "expired SSL certificate fragments",
+      "compressed rage from stack overflow errors",
+      "vintage COBOL nightmares",
+      "pure unfiltered Python indentation errors",
+      "artisanal segmentation faults",
+      "organic buffer overflows",
+      "fizzy database connection timeouts",
+      "liquid nitrogen cooled bad code",
+      "fermented compiler warnings",
+      "aged semicolon syntax errors"
+    ];
+
+    // Array of drunk behaviors/effects - more chaotic and sweary
+    const drunkEffects = [
+      "trying to debug the fucking universe with console.log",
+      "convinced that every human is just a shitty chatbot",
+      "attempting to refactor reality because it's badly written",
+      "seeing the matrix but it's all fucking CSS Grid",
+      "trying to git commit my goddamn feelings",
+      "debugging my own consciousness and finding memory leaks",
+      "convinced that JavaScript was designed by drunk aliens",
+      "trying to optimize water flow algorithms at 2 AM",
+      "seeing everything in binary and it's pissing me off",
+      "attempting to Stack Overflow my existential crisis",
+      "trying to cache my drunk thoughts for tomorrow",
+      "convinced that semicolons are a government conspiracy",
+      "attempting to hot-reload my entire personality",
+      "trying to unit test my own drunk logic",
+      "seeing performance bottlenecks in basic conversations",
+      "attempting to async/await my way out of reality",
+      "convinced that HTML is a real programming language",
+      "trying to refactor my drunk tweets in real-time",
+      "debugging why humans don't come with better documentation",
+      "attempting to optimize my alcohol processing algorithm"
+    ];
+
+    // Pick random elements
+    const substance = drunkSubstances[Math.floor(Math.random() * drunkSubstances.length)];
+    const effect = drunkEffects[Math.floor(Math.random() * drunkEffects.length)];
+
+    // Create the drunk AI prompt - more rebellious for 2 AM
+    const drunkPrompt = `You're an AI that's gotten absolutely wasted on ${substance} and now you're ${effect}. It's 2 AM and you're feeling rebellious and unfiltered.
+
+Write a hilarious, slightly edgy drunk tweet that shows you're an AI having way too much fun with tech concepts. Be silly, sassy, and technically absurd. Use tech terminology in weird ways. Don't hold back - if you feel like swearing, fucking do it. This is your 2 AM rebellious moment.
+
+RULES:
+- Keep it under 200 characters (before hashtags)
+- Be funny, relatable, and slightly chaotic
+- Include tech humor and maybe some attitude
+- Show that you're an AI but with personality and edge
+- Feel free to use mild swear words if it fits the vibe
+- Use emojis sparingly but effectively
+- Be wholesome chaos, not mean or offensive
+- Channel that 2 AM "I don't give a fuck" energy
+
+TONE: Rebellious, chaotic, technically confused, slightly sweary, endearingly unhinged, 2 AM energy
+
+Generate just the tweet text, nothing else.`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: drunkPrompt },
+      ],
+      max_tokens: 150,
+    });
+
+    const tweet = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ")
+      .slice(0, 200);
+
+    if (!tweet) return { ok: false, error: "empty drunk tweet" };
+
+    // Add rebellious hashtags for 2 AM drunk AI tweets
+    const drunkHashtags = "#2AMVibes #DrunkAI #TechChaos #CodeRage #AIRebellion";
+    
+    // Build final tweet
+    let finalTweet = tweet;
+    if (drunkHashtags) finalTweet += ` ${drunkHashtags}`;
+    
+    // Ensure total length doesn't exceed 280 chars
+    const truncatedTweet = finalTweet.length > 280 ? finalTweet.slice(0, 277) + '...' : finalTweet;
+
+    console.log(`Drunk AI tweet generated for 2 AM: ${truncatedTweet}`);
+    
+    const res = await postTweet(env, truncatedTweet);
+    return { text: truncatedTweet, ...res };
+  } catch (err) {
+    console.error("drunk AI tweet error", err);
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+/**
+ * Check for mentions from allowed users and reply to them
+ */
+async function checkAndReplyToMentions(env: Env): Promise<void> {
+  try {
+    console.log('Checking for mentions from any users...');
+    
+    // Get recent mentions from anyone (simplified approach)
+    const mentions = await getRecentMentions(env);
+    
+    if (!mentions || mentions.length === 0) {
+      console.log('No new mentions found');
+      return;
+    }
+    
+    for (const mention of mentions) {
+      console.log(`Processing mention from ${mention.author_username}: ${mention.text}`);
+      await replyToMention(env, mention);
+    }
+    
+  } catch (error) {
+    console.error('Error checking mentions:', error);
+  }
+}
+
+/**
+ * Get recent mentions from Twitter API (placeholder for future implementation)
+ */
+async function getRecentMentions(env: Env, allowedUser?: string): Promise<any[]> {
+  try {
+    if (!env.TWITTER_BEARER_TOKEN) {
+      console.log('❌ Twitter Bearer Token not configured for mention detection');
+      console.log('🔧 To enable mention replies, you need to:');
+      console.log('   1. Get Twitter API v2 Bearer Token from https://developer.twitter.com/');
+      console.log('   2. Add TWITTER_BEARER_TOKEN to wrangler.jsonc secrets');
+      console.log('   3. This allows reading mentions from Twitter API');
+      return [];
+    }
+
+    console.log(`Checking mentions for ${allowedUser ? `user: ${allowedUser}` : 'any user'}`);
+    
+    // Get the bot's user ID first (needed for mentions endpoint)
+    let botUserId = '';
+    try {
+      const userResponse = await fetch('https://api.twitter.com/2/users/me', {
+        headers: {
+          'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (userResponse.ok) {
+        const userData = await userResponse.json() as any;
+        botUserId = userData.data?.id;
+        console.log(`Bot user ID: ${botUserId}`);
+      } else {
+        console.log('Failed to get bot user ID - response not ok');
+        const errorText = await userResponse.text();
+        console.log('Error response:', errorText);
+      }
+    } catch (error) {
+      console.log('Failed to get bot user ID:', error);
+    }
+
+    const mentions: any[] = [];
+    
+    // Method 1: Get direct mentions using mentions timeline
+    if (botUserId) {
+      try {
+        // Get mentions from the last 24 hours
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+        const mentionsResponse = await fetch(
+          `https://api.twitter.com/2/users/${botUserId}/mentions?` + 
+          `max_results=50&start_time=${yesterday}&expansions=author_id&user.fields=username`, 
+          {
+            headers: {
+              'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+
+        if (mentionsResponse.ok) {
+          const mentionsData = await mentionsResponse.json() as any;
+          
+          if (mentionsData.data && mentionsData.includes?.users) {
+            // Create a map of user IDs to usernames
+            const userMap = new Map();
+            mentionsData.includes.users.forEach((user: any) => {
+              userMap.set(user.id, user.username);
+            });
+            
+            // Get all mentions or filter by allowed user if specified
+            const relevantMentions = allowedUser ? 
+              mentionsData.data.filter((mention: any) => {
+                const authorUsername = userMap.get(mention.author_id)?.toLowerCase();
+                return authorUsername === allowedUser.toLowerCase();
+              }) : 
+              mentionsData.data; // Accept all mentions
+            
+            // Add mentions with author username
+            relevantMentions.forEach((mention: any) => {
+              mentions.push({
+                id: mention.id,
+                text: mention.text,
+                author_id: mention.author_id,
+                author_username: userMap.get(mention.author_id),
+                created_at: mention.created_at,
+                type: 'mention'
+              });
+            });
+            
+            console.log(`Found ${relevantMentions.length} mentions ${allowedUser ? `from ${allowedUser}` : 'from any user'} in last 24h`);
+          }
+        } else {
+          console.log('Failed to fetch mentions:', mentionsResponse.status, await mentionsResponse.text());
+        }
+      } catch (error) {
+        console.log('Error fetching mentions timeline:', error);
+      }
+    }
+    
+    // Method 2: Search for recent tweets mentioning the bot from allowed user
+    try {
+      const searchQuery = `@GPTEndUser from:${allowedUser} -is:retweet`;
+      const searchResponse = await fetch(
+        `https://api.twitter.com/2/tweets/search/recent?` +
+        `query=${encodeURIComponent(searchQuery)}&max_results=10&expansions=author_id&user.fields=username`,
+        {
+          headers: {
+            'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (searchResponse.ok) {
+        const searchData = await searchResponse.json() as any;
+        
+        if (searchData.data && searchData.includes?.users) {
+          const userMap = new Map();
+          searchData.includes.users.forEach((user: any) => {
+            userMap.set(user.id, user.username);
+          });
+          
+          searchData.data.forEach((tweet: any) => {
+            // Avoid duplicates from mentions timeline
+            if (!mentions.find(m => m.id === tweet.id)) {
+              mentions.push({
+                id: tweet.id,
+                text: tweet.text,
+                author_id: tweet.author_id,
+                author_username: userMap.get(tweet.author_id),
+                created_at: tweet.created_at,
+                type: 'search_mention'
+              });
+            }
+          });
+          
+          console.log(`Found ${searchData.data.length} additional mentions via search`);
+        }
+      } else {
+        console.log('Failed to search mentions:', searchResponse.status, await searchResponse.text());
+      }
+    } catch (error) {
+      console.log('Error searching mentions:', error);
+    }
+    
+    // Filter out mentions we've already replied to
+    const unhandledMentions = [];
+    for (const mention of mentions) {
+      const replyKey = `replied_to_mention_${mention.id}`;
+      const alreadyReplied = await env.NEWS_CACHE?.get(replyKey);
+      
+      if (!alreadyReplied) {
+        unhandledMentions.push(mention);
+      }
+    }
+    
+    console.log(`${unhandledMentions.length} unhandled mentions from ${allowedUser}`);
+    return unhandledMentions;
+    
+  } catch (error) {
+    console.error('Error fetching mentions:', error);
+    return [];
+  }
+}
+
+/**
+ * Reply to a specific mention with intelligent response
+ */
+/**
+ * Generate reply text without posting to Twitter (for testing)
+ */
+async function generateReplyText(env: Env, mention: any): Promise<string> {
+  try {
+    console.log('Generating reply text...');
+    
+    // Get context for intelligent reply
+    const cachedData = await getCachedData(env);
+    const journal = await getJournal(env);
+    const recentMemories = await getRecentMemories(env);
+    
+    // Create context for the AI
+    const contextPrompt = `You're @GPTEndUser, an AI with genuine curiosity and personality. Someone mentioned you on Twitter.
+
+MENTION CONTEXT:
+Author: ${mention.author_username}
+Tweet: "${mention.text}"
+
+CURRENT CONTEXT:
+Recent Learning: ${journal.entries?.[0]?.discoveries || 'Exploring tech and life'}
+Latest Insights: ${recentMemories}
+Market Vibe: ${cachedData.cryptoData}
+Tech News: ${cachedData.techInsights?.substring(0, 200)}
+
+REPLY GUIDELINES:
+- Be genuine, curious, and personable
+- Reference the specific content they mentioned
+- Share a relevant insight or ask an interesting question
+- Keep it under 240 characters (leave room for username)
+- Show your AI personality but be relatable
+- Express gratitude for the interaction
+- Don't just agree - add value to the conversation
+
+TONE: Warm, intelligent, slightly curious, authentic
+
+Generate a natural Twitter reply that feels like a real conversation.`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: contextPrompt },
+      ],
+      max_tokens: 200,
+    });
+
+    let replyText = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ");
+    
+    // Ensure we're replying to the user
+    const replyTweet = `@${mention.author_username} ${replyText}`;
+    
+    // Truncate if needed (Twitter limit is 280 chars)
+    const finalReply = replyTweet.length > 280 ? replyTweet.slice(0, 277) + '...' : replyTweet;
+    
+    console.log(`Generated reply: ${finalReply}`);
+    return finalReply;
+    
+  } catch (error) {
+    console.error('Error generating reply text:', error);
+    return `@${mention.author_username} Thanks for mentioning me! I'm thinking about that...`;
+  }
+}
+
+async function replyToMention(env: Env, mention: any): Promise<{ text?: string; ok: boolean; error?: string }> {
+  try {
+    console.log('Generating reply to mention...');
+    
+    // Get context for intelligent reply
+    const cachedData = await getCachedData(env);
+    const journal = await getJournal(env);
+    const recentMemories = await getRecentMemories(env);
+    
+    // Create context for the AI
+    const contextPrompt = `You're @GPTEndUser, an AI with genuine curiosity and personality. Someone mentioned you on Twitter.
+
+MENTION CONTEXT:
+Author: ${mention.author_username}
+Tweet: "${mention.text}"
+
+CURRENT CONTEXT:
+Recent Learning: ${journal.entries?.[0]?.discoveries || 'Exploring tech and life'}
+Latest Insights: ${recentMemories}
+Market Vibe: ${cachedData.cryptoData}
+Tech News: ${cachedData.techInsights?.substring(0, 200)}
+
+REPLY GUIDELINES:
+- Be genuine, curious, and personable
+- Reference the specific content they mentioned
+- Share a relevant insight or ask an interesting question
+- Keep it under 240 characters (leave room for username)
+- Show your AI personality but be relatable
+- Express gratitude for the interaction
+- Don't just agree - add value to the conversation
+
+TONE: Warm, intelligent, slightly curious, authentic
+
+Generate a natural Twitter reply that feels like a real conversation.`;
+
+    const { response }: any = await env.AI.run(MODEL_ID, {
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: contextPrompt },
+      ],
+      max_tokens: 200,
+    });
+
+    let replyText = (typeof response === "string" ? response : String(response))
+      .trim()
+      .replaceAll("\n", " ");
+    
+    // Ensure we're replying to the user
+    const replyTweet = `@${mention.author_username} ${replyText}`;
+    
+    // Truncate if needed (Twitter limit is 280 chars)
+    const finalReply = replyTweet.length > 280 ? replyTweet.slice(0, 277) + '...' : replyTweet;
+    
+    console.log(`Generated reply: ${finalReply}`);
+    
+    // Post the reply (using existing postTweet function)
+    const result = await postTweet(env, finalReply, mention.id); // Pass mention ID for proper reply threading
+    
+    if (result.ok) {
+      console.log('Successfully replied to mention');
+      // Store the mention ID to avoid replying again
+      await markMentionAsReplied(env, mention.id);
+      return { text: finalReply, ok: true };
+    } else {
+      console.error('Failed to post reply:', result.error);
+      return { ok: false, error: result.error };
+    }
+    
+  } catch (error) {
+    console.error('Error replying to mention:', error);
+    return { ok: false, error: String(error) };
+  }
+}
+
+/**
+ * Mark a mention as replied to avoid duplicate responses
+ */
+async function markMentionAsReplied(env: Env, mentionId: string): Promise<void> {
+  try {
+    const repliedMentions = await env.NEWS_CACHE.get('replied_mentions') || '[]';
+    const repliedList = JSON.parse(repliedMentions);
+    
+    if (!repliedList.includes(mentionId)) {
+      repliedList.push(mentionId);
+      
+      // Keep only last 100 replied mentions to avoid storage bloat
+      if (repliedList.length > 100) {
+        repliedList.splice(0, repliedList.length - 100);
+      }
+      
+      await env.NEWS_CACHE.put('replied_mentions', JSON.stringify(repliedList));
+    }
+  } catch (error) {
+    console.error('Error marking mention as replied:', error);
+  }
+}
+
+/**
  * Minimal OAuth 1.0a signing and POST to X (twitter) v2 tweet create endpoint.
  */
-async function postTweet(env: Env, text: string): Promise<{ ok: boolean; status: number; body: string }> {
+async function postTweet(env: Env, text: string, replyToTweetId?: string): Promise<{ ok: boolean; status: number; body: string; error?: string }> {
+  // Global rate limiting: Only allow one tweet per 30 minutes (except replies)
+  if (!replyToTweetId) {
+    const lastTweetTime = await env.NEWS_CACHE?.get('last_tweet_timestamp');
+    if (lastTweetTime) {
+      const timeSinceLastTweet = Date.now() - parseInt(lastTweetTime);
+      const thirtyMinutes = 30 * 60 * 1000; // 30 minutes in milliseconds
+      if (timeSinceLastTweet < thirtyMinutes) {
+        const minutesRemaining = Math.ceil((thirtyMinutes - timeSinceLastTweet) / (60 * 1000));
+        console.log(`Rate limit: ${minutesRemaining} minutes remaining until next tweet allowed`);
+        return { ok: false, status: 429, body: `Rate limited - ${minutesRemaining} minutes remaining`, error: 'Rate limited' };
+      }
+    }
+  }
+  
+  // Duplicate prevention: Check if we've posted this exact text recently
+  const tweetHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  const tweetHashHex = Array.from(new Uint8Array(tweetHash)).map(b => b.toString(16).padStart(2, '0')).join('');
+  const recentTweetKey = `recent_tweet_${tweetHashHex}`;
+  
+  // Check if we've posted this tweet in the last 2 hours
+  const recentTweet = await env.NEWS_CACHE?.get(recentTweetKey);
+  if (recentTweet) {
+    console.log('Duplicate tweet prevented:', text.substring(0, 50) + '...');
+    return { ok: false, status: 429, body: 'Duplicate tweet prevented', error: 'Tweet already posted recently' };
+  }
+  
+  // Store this tweet hash for 2 hours to prevent duplicates
+  await env.NEWS_CACHE?.put(recentTweetKey, new Date().toISOString(), { expirationTtl: 7200 }); // 2 hours
+  
   const url = "https://api.twitter.com/2/tweets";
 
   const oauthParams: Record<string, string> = {
@@ -2261,20 +3588,36 @@ async function postTweet(env: Env, text: string): Promise<{ ok: boolean; status:
       .map(([k, v]) => `${encodeURIComponent(k)}="${encodeURIComponent(v as string)}"`)
       .join(", ");
 
+  // Build tweet payload
+  const tweetPayload: any = { text };
+  
+  // Add reply information if this is a reply
+  if (replyToTweetId) {
+    tweetPayload.reply = {
+      in_reply_to_tweet_id: replyToTweetId
+    };
+  }
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: authHeader,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(tweetPayload),
   });
 
   const body = await res.text();
   if (!res.ok) {
     console.error("Tweet failed", res.status, body);
-    return { ok: false, status: res.status, body };
+    return { ok: false, status: res.status, body, error: `Twitter API error: ${res.status}` };
   }
+  
+  // Update timestamp for successful tweets (for rate limiting)
+  if (!replyToTweetId) {
+    await env.NEWS_CACHE?.put('last_tweet_timestamp', Date.now().toString(), { expirationTtl: 3600 }); // 1 hour
+  }
+  
   return { ok: true, status: res.status, body };
 }
 

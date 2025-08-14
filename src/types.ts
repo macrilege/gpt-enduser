@@ -41,6 +41,17 @@ export interface Env {
    */
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;
+  
+  /**
+   * Twitter username allowed to mention and get replies (whitelist)
+   */
+  ALLOWED_MENTION_USER?: string;
+  
+  /**
+   * Optional weather API keys for multiple source validation
+   */
+  OPENWEATHER_API_KEY?: string;
+  WEATHERAPI_KEY?: string;
 }
 
 /**
